@@ -28,6 +28,8 @@ test("computes tool, error, escape and token metrics", () => {
   assert.equal(m.toolErrors, 1, "the denied call is an escape, not a tool error");
   assert.equal(m.tokensTotal, 370 + 1050, "sums every model, including side-model calls");
   assert.equal(m.tokensByModel["claude-haiku-4-5"].total, 1050);
+  // weighted: sonnet 10*1 + 20*5 + 300*0.1 + 40*1.25 = 190; haiku 1000 + 50*5 = 1250
+  assert.equal(m.tokensWeighted, 190 + 1250);
   assert.equal(m.numTurns, 4);
   assert.equal(m.resultText, "Example Domain");
   assert.equal(m.sdkSubtype, "success");
@@ -36,6 +38,7 @@ test("computes tool, error, escape and token metrics", () => {
 test("handles a stream with no result message", () => {
   const m = computeMetrics(msgs.slice(0, 2), []);
   assert.equal(m.tokensTotal, null);
+  assert.equal(m.tokensWeighted, null);
   assert.equal(m.resultText, null);
   assert.equal(m.sdkSubtype, null);
 });

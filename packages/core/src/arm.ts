@@ -1,7 +1,7 @@
 // Turns a pack arm into isolated Agent SDK options. See SPEC §4.2–4.3 and the M0 findings.
 import { cpSync, existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import type { HookCallback, Options } from "@anthropic-ai/claude-agent-sdk";
 import { bashPrefixes, checkBash } from "./bashGuard.ts";
 import { packPath, type Arm, type Effort, type Pack } from "./pack.ts";
@@ -83,23 +83,50 @@ export function trialEnv(pack: Pack, arm: Arm, trialDir: string, extra: Record<s
   return env;
 }
 
-/** PreToolUse backstop: denies anything outside the arm's allowlist and records it. */
-export function lockdownHook(arm: Arm, denials: GuardDenial[]): HookCallback {
+/** Tools every arm may use regardless of pack config (SPEC §4.3). */
+export const COMMON_TOOLS = ["Read"] as const;
+
+/**
+ * Tool definitions are identical across arms (the union of every arm's tools, plus
+ * Skill if any arm ships skills, plus the common tools), so no arm gets a cheaper
+ * context just by carrying fewer tool descriptions. Only permissions differ.
+ */
+export function sharedToolset(pack: Pack): { tools: string[]; mcpServers: Record<string, unknown> } {
+  const arms = Object.values(pack.arms);
+  const tools = new Set<string>(COMMON_TOOLS);
+  for (const a of arms) for (const t of a.tools) tools.add(t);
+  if (arms.some((a) => a.skills.length > 0)) tools.add("Skill");
+  const mcpServers: Record<string, unknown> = {};
+  for (const a of arms) Object.assign(mcpServers, a.mcp_servers);
+  return { tools: [...tools], mcpServers };
+}
+
+const underDir = (p: string, dir: string) => p === dir || p.startsWith(dir + "/");
+
+/**
+ * PreToolUse backstop: denies anything outside the arm's own permissions and records it
+ * as an escape. `readRoots` are the only places the common Read tool may look.
+ */
+export function lockdownHook(arm: Arm, denials: GuardDenial[], readRoots: string[] = []): HookCallback {
   const allow = bashPrefixes(arm.allow);
   const deny = bashPrefixes(arm.deny);
   const mcpPrefixes = Object.keys(arm.mcp_servers).map((s) => `mcp__${s}__`);
-  const permitted = new Set([...arm.tools, "Skill"]);
+  const permitted = new Set(arm.tools);
+  if (arm.skills.length > 0) permitted.add("Skill");
 
   return async (input) => {
     if (input.hook_event_name !== "PreToolUse") return {};
     const { tool_name: tool, tool_input: toolInput, tool_use_id: toolUseId } = input;
     let reason: string | null = null;
-    if (tool === "Bash") {
+    if (tool === "Bash" && permitted.has("Bash")) {
       const cmd = String((toolInput as { command?: unknown })?.command ?? "");
       const v = checkBash(cmd, allow, deny);
       if (!v.ok) reason = v.reason;
+    } else if (tool === "Read" && !permitted.has("Read")) {
+      const file = resolve(String((toolInput as { file_path?: unknown })?.file_path ?? ""));
+      if (!readRoots.some((r) => underDir(file, r))) reason = "Read is limited to this trial's saved tool outputs";
     } else if (!permitted.has(tool) && !mcpPrefixes.some((p) => tool.startsWith(p))) {
-      reason = `tool ${tool} is not available in this arm`;
+      reason = `${tool} is not allowed in this arm`;
     }
     if (!reason) return {};
     denials.push({ toolUseId, tool, input: toolInput, reason });
@@ -146,9 +173,14 @@ export interface QueryOptionsInput {
 
 export function buildQueryOptions(i: QueryOptionsInput): Options {
   const arm = i.pack.arms[i.armName];
-  const hasSkills = (i.plugin?.skills.length ?? 0) > 0;
   const cwd = trialWorkDir(i.trialDir);
   if (!existsSync(cwd)) mkdirSync(cwd, { recursive: true });
+  const shared = sharedToolset(i.pack);
+  // Read is for Claude Code's saved large outputs (and the empty work dir), nothing else.
+  const readRoots = [claudeProjectDir(cwd), realpathSync(cwd)];
+  const readRules = arm.tools.includes("Read") ? [] : readRoots.map((r) => `Read(/${r}/**)`);
+  const allowedTools = [...arm.allow, ...readRules];
+  if (arm.skills.length > 0) allowedTools.push("Skill");
   return {
     cwd,
     env: trialEnv(i.pack, arm, i.trialDir, i.extraEnv),
@@ -161,14 +193,15 @@ export function buildQueryOptions(i: QueryOptionsInput): Options {
     settingSources: [],
     strictMcpConfig: true,
     persistSession: false,
-    mcpServers: arm.mcp_servers,
+    // Same tool definitions in every arm; only this arm's skills/hooks are injected.
+    tools: shared.tools,
+    mcpServers: shared.mcpServers as Options["mcpServers"],
     skills: i.plugin?.skills ?? [],
     plugins: i.plugin ? [{ type: "local", path: i.plugin.path }] : [],
-    // Lockdown: only these tools exist; only these rules are approved; the rest is denied.
-    tools: hasSkills ? [...new Set([...arm.tools, "Skill"])] : arm.tools,
-    allowedTools: hasSkills ? [...arm.allow, "Skill"] : arm.allow,
+    // Lockdown: only this arm's rules are approved; everything else is denied (dontAsk).
+    allowedTools,
     disallowedTools: arm.deny,
     permissionMode: "dontAsk",
-    hooks: { PreToolUse: [{ hooks: [lockdownHook(arm, i.denials)] }] },
+    hooks: { PreToolUse: [{ hooks: [lockdownHook(arm, i.denials, readRoots)] }] },
   };
 }

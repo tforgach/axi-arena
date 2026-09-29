@@ -163,7 +163,7 @@ async function runTrial(
 ): Promise<TrialOutcome> {
   const empty: TrialOutcome = {
     status: "error", result_text: null, sdk_subtype: null, num_turns: null, tool_calls: null, tool_errors: null,
-    escape_attempts: null, duration_ms: null, duration_api_ms: null, tokens_total: null, tokens_json: null,
+    escape_attempts: null, duration_ms: null, duration_api_ms: null, tokens_total: null, tokens_weighted: null, tokens_json: null,
     cost_usd: null, error: null,
   };
   const scriptEnv = { ...arenaVars, ARENA_TRIAL_ID: t.id, ARENA_ARM: t.arm, ARENA_MODEL: t.model, ARENA_TRIAL_DIR: trialDir };
@@ -224,6 +224,7 @@ async function runTrial(
     duration_ms: m.durationMs,
     duration_api_ms: m.durationApiMs,
     tokens_total: m.tokensTotal,
+    tokens_weighted: m.tokensWeighted,
     tokens_json: JSON.stringify(m.tokensByModel),
     cost_usd: m.costUsd,
     error: timedOut ? `timed out after ${opts.timeoutS}s` : error,

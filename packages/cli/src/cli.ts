@@ -114,7 +114,7 @@ function printEstimate(pack: Pack, opts: RunOptions): void {
   console.log(`effort    ${opts.effort}  ·  concurrency ${opts.concurrency}  ·  max turns ${opts.maxTurns}  ·  timeout ${opts.timeoutS}s`);
   if (known > 0) {
     const projected = (tokens / known) * planned.length;
-    console.log(`tokens    ~${fmt(projected)} (from ${known}/${planned.length} trials with history)`);
+    console.log(`tokens    ~${fmt(projected)} cost-weighted (from ${known}/${planned.length} trials with history)`);
   } else {
     console.log(`tokens    unknown — no previous runs of this pack`);
   }
@@ -135,7 +135,7 @@ function printSummary(trials: TrialRow[], armOrder: string[]): void {
     const k = `${t.model}\u0000${t.task_id}\u0000${t.arm}`;
     groups.set(k, [...(groups.get(k) ?? []), t]);
   }
-  const rows: string[][] = [["model", "task", "arm", "ok", "tokens", "turns", "time s", "tools", "errors", "escapes"]];
+  const rows: string[][] = [["model", "task", "arm", "ok", "w-tokens", "raw tokens", "turns", "time s", "tools", "errors", "escapes"]];
   const keys = [...groups.keys()].sort((a, b) => {
     const [ma, ta, aa] = a.split("\u0000");
     const [mb, tb, ab] = b.split("\u0000");
@@ -149,6 +149,7 @@ function printSummary(trials: TrialRow[], armOrder: string[]): void {
     rows.push([
       model, task, arm,
       `${g.filter((t) => t.status === "success").length}/${g.length}`,
+      fmt(med((t) => t.tokens_weighted)),
       fmt(med((t) => t.tokens_total)),
       fmt(med((t) => t.num_turns), 1),
       fmt((med((t) => t.duration_ms) ?? NaN) / 1000, 1).replace("NaN", "–"),
@@ -158,12 +159,12 @@ function printSummary(trials: TrialRow[], armOrder: string[]): void {
     ]);
   }
   const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
-  const numeric = new Set([3, 4, 5, 6, 7, 8, 9]);
+  const numeric = new Set([3, 4, 5, 6, 7, 8, 9, 10]);
   for (const [i, r] of rows.entries()) {
     console.log(r.map((c, j) => (numeric.has(j) ? c.padStart(widths[j]) : c.padEnd(widths[j]))).join("  "));
     if (i === 0) console.log(widths.map((w) => "─".repeat(w)).join("  "));
   }
-  console.log("\nmedians per group · correctness and Arena Score arrive in M2");
+  console.log("\nmedians per group · w-tokens = cost-weighted (scored), raw = plain sum · correctness and Arena Score arrive in M2");
 }
 
 async function cmdRun(): Promise<void> {
@@ -194,7 +195,7 @@ async function cmdRun(): Promise<void> {
       const esc = o.escape_attempts ? `  ${o.escape_attempts} escape(s)` : "";
       console.log(
         `[${String(done).padStart(String(total).length)}/${total}] ${mark} ${t.task.id} · ${t.arm} · ${t.model} #${t.index}` +
-          `  ${fmt(o.tokens_total)} tok  ${o.num_turns ?? "–"} turns  ${fmt((o.duration_ms ?? 0) / 1000, 1)}s${esc}${extra}`,
+          `  ${fmt(o.tokens_weighted)} w-tok  ${o.num_turns ?? "–"} turns  ${fmt((o.duration_ms ?? 0) / 1000, 1)}s${esc}${extra}`,
       );
     },
     onLog: (l) => console.log(l.split("\n").map((x) => `  │ ${x}`).join("\n")),

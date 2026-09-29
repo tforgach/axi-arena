@@ -76,8 +76,9 @@ A match is the same task, same model, same system prompt and same inputs for bot
 The AXI arm can **only** call its AXI commands, and baseline arms can only call their native tools.
 
 Note: `allowedTools` in the SDK only *auto-approves* tools. It does **not** restrict them. Lockdown therefore takes three layers:
-1. `tools`: the whitelist of tools that exist at all, e.g. `["Bash"]` for the AXI arm and `["WebFetch"]` for the fetch baseline.
-2. `allowedTools` with scoped rules such as `Bash(axi-fetch:*)`, plus `permissionMode: 'dontAsk'`, so anything that doesn't match is denied instead of prompting.
+1. **Same tool definitions in every arm.** `tools` is the union of every arm's tools (plus their MCP servers), plus `Skill` if any arm ships skills, plus the common tools. No arm gets a cheaper context just because it carries fewer tool descriptions. *(Decided after M1: Bash's large description gave the AXI arm about 11.3k tokens of starting context against about 7.6k for WebFetch.)*
+2. **Only permissions differ.** `allowedTools` holds just this arm's rules (e.g. `Bash(axi-fetch:*)`), with `permissionMode: 'dontAsk'`, so anything that doesn't match is denied instead of prompting. Calling a tool that's defined but not permitted counts as an escape.
+   - **Common tool `Read`** is in every arm, limited to the trial's own saved-output folder. *(Decided after M1: Claude Code saves large tool outputs to a file, and without `Read` the agent can't open it.)*
 3. A backstop `PreToolUse` hook that denies and logs anything outside the arm's allowlist. It must **parse compound commands** (`;`, `&&`, `|`, `$(…)`) and require every segment to be allowed. A plain prefix check would let `axi-fetch x; curl y` through.
 4. The AXI arm also gets the `Skill` tool, so the agent can read the AXI's skill. That call is part of the AXI's real cost and counts toward its turns and tokens.
 
@@ -184,7 +185,8 @@ after:  scripts/cleanup.sh
 | Metric | Source |
 |---|---|
 | `correctness` ∈ [0,1] | LLM judge (§6.2) |
-| `tokens_total` | Sum over `modelUsage` of input + cache_creation + cache_read + output. **Includes side-model calls**, e.g. WebFetch's internal summarizer. *(M0: confirmed. On a Sonnet trial, WebFetch's summarizer shows up as a separate `claude-haiku-4-5` entry.)* |
+| `tokens_weighted` **(scored)** | Cost-weighted input-token equivalents, summed over every model in `modelUsage`: input ×1, cache write ×1.25, cache read ×0.1, output ×5. These are ratios to the model's own input price and hold for all current models. Models are not scaled by their absolute price. *(Decided after M1: cache reads made up most of the plain sum.)* |
+| `tokens_total` | Plain sum over `modelUsage` of input + cache_creation + cache_read + output. **Includes side-model calls**, e.g. WebFetch's internal summarizer. *(M0: confirmed. On a Sonnet trial, WebFetch's summarizer shows up as a separate `claude-haiku-4-5` entry.)* |
 | `tokens_breakdown` | Per model and per kind (input/output/cache), plus estimated **tool-output tokens**: the tokens tool results added to context. This is the AXI's direct lever. |
 | `turns` | `num_turns` |
 | `tool_calls` | Counted from the transcript |
@@ -204,7 +206,7 @@ For each (task, model, baseline):
 
 1. Take the **median** of each metric over the N trials per arm.
 2. Relative improvement per efficiency metric, where higher is better for the AXI:
-   `r_m = clamp((baseline_m − axi_m) / baseline_m, −1, 1)` for m ∈ {tokens, turns, time, errors}. If `errors` is 0 on both sides, r = 0.
+   `r_m = clamp((baseline_m − axi_m) / baseline_m, −1, 1)` for m ∈ {tokens (= `tokens_weighted`), turns, time, errors}. Errors include escape attempts. If `errors` is 0 on both sides, r = 0.
 3. `efficiency = Σ w_m · r_m` using the pack's weights (default tokens 0.4, turns 0.2, time 0.2, errors 0.2).
 4. **Correctness gate:**
    - If `axi_correctness < min_correctness`, or `axi_correctness < baseline_correctness − max_regression`, the match **fails the gate**. Its score is `min(0, efficiency) − (baseline_correctness − axi_correctness)`, and it's marked ✗.
@@ -296,14 +298,12 @@ Local only (`127.0.0.1`). It reads from SQLite and streams live updates over SSE
 | v2 | Later | Adoption arm (both tools available), other providers, CI mode (fail on score regression). |
 
 ## 14. Open questions
-
-Raised by the first M1 smoke run (Haiku, 1 trial per task):
-
-1. **Should every arm have the same tools?** Right now the AXI arm has `Bash` and the WebFetch arm only has `WebFetch`. Bash's tool description is large, so the AXI arm starts every turn with about 11.3k tokens of context versus about 7.6k for WebFetch. Real Claude Code users always have Bash loaded, so this makes the native arm look artificially cheap. *Proposal:* every arm gets the same tool **definitions**, and only its **permissions** differ. Calls to tools an arm isn't allowed to use count as escapes.
-2. **Should arms have `Read` for saved outputs?** When a tool returns a lot of output, Claude Code saves it to a file and gives the agent the path. Without `Read`, the AXI arm couldn't open that file (9 escapes on `python-asyncio-timeout`), so it answered from memory. *Proposal:* all arms get `Read`, scoped to Claude's saved-output folder only.
-3. **How should tokens be counted?** Right now the metric is a plain sum. Cache reads (billed at about 10% of normal input) make up most of it: 22.5k of the AXI arm's 35k tokens on `example-title`. Options are (a) the plain sum, (b) cost-weighted tokens (cache read ×0.1, cache write ×1.25, output at its price ratio), or (c) only new context: input + cache writes + output. *Proposal:* (b) for the score, with the plain sum shown next to it.
+_None open right now._
 
 ### Decided
+- Tool parity: every arm gets the same tool definitions and only permissions differ (§4.3).
+- `Read` is a common tool in every arm, limited to the trial's saved outputs (§4.3).
+- Token metric: cost-weighted tokens are scored, and the plain sum is shown next to them (§6.1).
 - Gate: min correctness 0.8, max regression 0.05 (§6.3).
 - Pack discovery: path, plus an optional name registry in `~/.axi-arena/config.yaml`.
 - Tool-output tokens: local tokenizer estimate; headline totals come from SDK usage.

@@ -7,14 +7,26 @@ export interface ModelTokens {
   output: number;
   cacheRead: number;
   cacheCreation: number;
+  /** Plain sum of the four kinds. */
   total: number;
+  /** Cost-weighted, in input-token equivalents (see TOKEN_WEIGHTS). */
+  weighted: number;
 }
+
+/**
+ * Relative prices per token kind, as multiples of the model's input price. These ratios
+ * hold for every current Claude model. Cache writes use the 5-minute rate. Models are
+ * summed without scaling by their absolute prices, so the score stays in token units.
+ */
+export const TOKEN_WEIGHTS = { input: 1, cacheCreation: 1.25, cacheRead: 0.1, output: 5 } as const;
 
 export interface TrialMetrics {
   toolCalls: number;
   toolErrors: number;
   escapeAttempts: number;
   tokensTotal: number | null;
+  /** The scored token metric: cost-weighted input-token equivalents across all models. */
+  tokensWeighted: number | null;
   tokensByModel: Record<string, ModelTokens>;
   numTurns: number | null;
   durationMs: number | null;
@@ -33,8 +45,12 @@ export function tokensByModel(result: SDKResultMessage): Record<string, ModelTok
       cacheRead: u.cacheReadInputTokens ?? 0,
       cacheCreation: u.cacheCreationInputTokens ?? 0,
       total: 0,
+      weighted: 0,
     };
     t.total = t.input + t.output + t.cacheRead + t.cacheCreation;
+    t.weighted =
+      t.input * TOKEN_WEIGHTS.input + t.cacheCreation * TOKEN_WEIGHTS.cacheCreation +
+      t.cacheRead * TOKEN_WEIGHTS.cacheRead + t.output * TOKEN_WEIGHTS.output;
     out[model] = t;
   }
   return out;
@@ -68,6 +84,7 @@ export function computeMetrics(messages: SDKMessage[], guardDenials: GuardDenial
     toolErrors: erroredIds.filter((id) => !escaped.has(id)).length,
     escapeAttempts: escaped.size,
     tokensTotal: result ? Object.values(byModel).reduce((s, t) => s + t.total, 0) : null,
+    tokensWeighted: result ? Math.round(Object.values(byModel).reduce((s, t) => s + t.weighted, 0)) : null,
     tokensByModel: byModel,
     numTurns: result?.num_turns ?? null,
     durationMs: result?.duration_ms ?? null,
