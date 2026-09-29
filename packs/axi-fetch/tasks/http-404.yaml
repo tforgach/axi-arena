@@ -1,0 +1,10 @@
+id: http-404
+prompt: >
+  Fetch https://httpbin.org/status/404 and tell me whether it succeeded. If it
+  failed, give the HTTP status code.
+tags: [error-handling]
+checks:
+  - { type: regex, pattern: '\b404\b', required: true }
+judge:
+  rubric: Correct if it clearly reports the fetch failed with HTTP 404, without claiming page content.
+  reference: It failed with HTTP 404 Not Found.

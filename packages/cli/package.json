@@ -1,0 +1,8 @@
+{
+  "name": "@axi-arena/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "bin": { "axi-arena": "./src/cli.ts" },
+  "dependencies": { "@axi-arena/core": "*" }
+}

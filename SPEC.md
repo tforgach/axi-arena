@@ -65,6 +65,7 @@ A match is the same task, same model, same system prompt and same inputs for bot
 - `settingSources: []`. None of the user's `~/.claude` settings, CLAUDE.md, skills, hooks or MCP servers are loaded.
 - `strictMcpConfig: true` and an explicit `mcpServers`. *(M0 finding: without these, claude.ai account connectors leak into the session even with `settingSources: []`.)*
 - `CLAUDE_CODE_DISABLE_BUNDLED_SKILLS=1` and an explicit `skills` list. *(M0: this took the base context from ~4.2k to ~1.3k input tokens.)* Two built-in plugins (`agents-md`, `telemetry`) and the `design`/`doctor` entries still load, but they're identical in both arms.
+- `persistSession: false`, and the runner deletes `~/.claude/projects/<trial path>` after each trial. *(M1 finding: Claude Code still saves large tool outputs there. A per-trial `CLAUDE_CONFIG_DIR` would avoid it, but it breaks the subscription login.)*
 - `XDG_CACHE_HOME` (and the other XDG dirs) point inside the trial dir, so AXI disk caches can't carry over between trials. *(M0: axi-fetch's 15-minute cache would otherwise have served stale content.)*
 - `env` is built explicitly. The SDK replaces the environment rather than merging it, so the trial gets only a minimal PATH, the proxy vars, the arm's env and the auth vars.
 - `maxTurns` (default 30) and a per-trial wall-clock timeout (default 5 minutes) enforced through `abortController`.
@@ -275,11 +276,11 @@ Local only (`127.0.0.1`). It reads from SQLite and streams live updates over SSE
 
 ## 12. Architecture and stack (proposed)
 
-- **TypeScript, Node 24, pnpm workspaces**, matching axi-fetch.
+- **TypeScript on Node ≥24, npm workspaces.** Node runs the `.ts` files directly, so there's no build step; `tsc` is only used for typechecking. (The plan said pnpm, but it isn't installed and npm is enough.)
   - `packages/core`: pack schema (zod), runner, proxy, checks, judge, scoring, and the DB layer.
   - `packages/cli`: the `axi-arena` binary.
   - `packages/web`: the web app. Vite + React UI, served by a small Hono server with SSE.
-- **SQLite** (`node:sqlite` or `better-sqlite3`) at `~/.axi-arena/arena.db`. Tables: `runs`, `trials`, `events` (raw SDK messages, append-only), `checks`, `judgments`, `matches`.
+- **SQLite** (built-in `node:sqlite`) at `~/.axi-arena/arena.db` (`AXI_ARENA_HOME` overrides the location). Tables: `runs`, `trials`, `events` (raw SDK messages, append-only), `checks`, `judgments`, `matches`.
 - Raw SDK messages are stored in full, so `rescore` and future metrics never need a re-run.
 
 ## 13. Milestones
@@ -287,7 +288,7 @@ Local only (`127.0.0.1`). It reads from SQLite and streams live updates over SSE
 | # | Milestone | Done when |
 |---|---|---|
 | **M0** ✅ | Spike: de-risk (done 2026-09-29, see `spike/`) | Confirmed: (a) SDK runs on the subscription login, or the `cli` fallback is wired up instead, (b) strict lockdown works (`tools` + `dontAsk` + hook), (c) injecting skills and hooks per trial with `settingSources: []`, (d) whether `WebFetch` traffic goes through a local proxy, (e) `modelUsage` captures WebFetch's side-model tokens, (f) how to pin effort in each backend. |
-| **M1** | Runner + CLI + SQLite | `axi-arena run packs/axi-fetch` runs isolated trials for both arms and stores metrics. |
+| **M1** ✅ | Runner + CLI + SQLite (done 2026-09-29) | `axi-arena run packs/axi-fetch` runs isolated trials for both arms and stores metrics. |
 | **M2** | Checks + judge + scoring | Correctness, Arena Score and CIs in the CLI summary; `rescore` works. |
 | **M3** | Web app | Runs, run overview, match detail, live transcripts. |
 | **M4** | Replay | Record/replay proxy, synthetic fixtures, fixture-miss detection. |
@@ -295,7 +296,12 @@ Local only (`127.0.0.1`). It reads from SQLite and streams live updates over SSE
 | v2 | Later | Adoption arm (both tools available), other providers, CI mode (fail on score regression). |
 
 ## 14. Open questions
-_None open right now._
+
+Raised by the first M1 smoke run (Haiku, 1 trial per task):
+
+1. **Should every arm have the same tools?** Right now the AXI arm has `Bash` and the WebFetch arm only has `WebFetch`. Bash's tool description is large, so the AXI arm starts every turn with about 11.3k tokens of context versus about 7.6k for WebFetch. Real Claude Code users always have Bash loaded, so this makes the native arm look artificially cheap. *Proposal:* every arm gets the same tool **definitions**, and only its **permissions** differ. Calls to tools an arm isn't allowed to use count as escapes.
+2. **Should arms have `Read` for saved outputs?** When a tool returns a lot of output, Claude Code saves it to a file and gives the agent the path. Without `Read`, the AXI arm couldn't open that file (9 escapes on `python-asyncio-timeout`), so it answered from memory. *Proposal:* all arms get `Read`, scoped to Claude's saved-output folder only.
+3. **How should tokens be counted?** Right now the metric is a plain sum. Cache reads (billed at about 10% of normal input) make up most of it: 22.5k of the AXI arm's 35k tokens on `example-title`. Options are (a) the plain sum, (b) cost-weighted tokens (cache read ×0.1, cache write ×1.25, output at its price ratio), or (c) only new context: input + cache writes + output. *Proposal:* (b) for the score, with the plain sum shown next to it.
 
 ### Decided
 - Gate: min correctness 0.8, max regression 0.05 (§6.3).

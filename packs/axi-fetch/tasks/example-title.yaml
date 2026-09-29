@@ -1,0 +1,9 @@
+id: example-title
+prompt: What is the title of the page at https://example.com? Reply with just the title.
+tags: [smoke, single-fetch]
+checks:
+  - { type: contains, value: Example Domain, required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Correct if the answer is the page title "Example Domain".
+  reference: Example Domain

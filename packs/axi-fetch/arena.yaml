@@ -1,0 +1,26 @@
+# Reference pack: axi-fetch vs Claude Code's built-in WebFetch.
+name: axi-fetch
+version: 0.1.0
+axi_version_cmd: axi-fetch --version
+
+# Installs a pinned axi-fetch into .tools/ (no global install).
+setup: scripts/setup.sh
+
+defaults:
+  trials: 3
+  models: [claude-sonnet-5-5]
+  max_turns: 20
+  timeout_s: 180
+  effort: medium
+  network: live            # replay arrives in M4
+
+arms:
+  axi:
+    tools: [Bash]
+    allow: ["Bash(axi-fetch:*)"]
+    deny: ["Bash(axi-fetch update:*)"]   # self-update would change the AXI mid-run
+    skills: [skills/axi-fetch]
+    path: [.tools/node_modules/.bin]
+  webfetch:
+    tools: [WebFetch]
+    allow: [WebFetch]
