@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { TranscriptItem } from "../types.ts";
+import type { CostBreakdown, TranscriptItem } from "../types.ts";
 import { num, secs } from "../format.ts";
 
 function inputPreview(name: string, input: unknown): string {
@@ -13,8 +13,22 @@ function inputPreview(name: string, input: unknown): string {
 
 const LONG = 1200;
 
+/** Measured tokens this call added to the context (plus side-model tokens, if any). */
+function CallTokens({ cost, chars, live }: { cost?: { contextTokens: number | null; sideTokens: number }; chars: number; live: boolean }) {
+  if (cost?.contextTokens == null) {
+    return <span title="Measured from the next API call's prompt size">{live ? "measuring…" : "–"} · {num(chars)} chars</span>;
+  }
+  return (
+    <span title="Tokens this call added to the next API call's prompt (measured from usage), including the model's own call text">
+      <b style={{ color: "var(--ink)" }}>+{num(cost.contextTokens)}</b> tokens to context
+      {cost.sideTokens > 0 && <> · <b style={{ color: "var(--ink)" }}>{num(cost.sideTokens)}</b> on a side model</>}
+      {" "}· {num(chars)} chars
+    </span>
+  );
+}
+
 /** Tool calls paired with their results, assistant text, hooks and the final answer. */
-export function Transcript({ items, live }: { items: TranscriptItem[]; live: boolean }) {
+export function Transcript({ items, live, costs }: { items: TranscriptItem[]; live: boolean; costs: CostBreakdown }) {
   const results = new Map(items.flatMap((it) => (it.kind === "tool_result" ? [[it.id, it] as const] : [])));
   // The SDK repeats the last assistant text as the result; show it once, in the final-answer card.
   const finalText = items.find((it) => it.kind === "result")?.text?.trim();
@@ -57,7 +71,7 @@ export function Transcript({ items, live }: { items: TranscriptItem[]; live: boo
                   {r?.escape && <span className="bad">⛔ escape attempt — denied by lockdown</span>}
                   {r && !r.escape && r.isError && <span className="bad">✗ error</span>}
                   <span className="right">
-                    {r ? <span>~{num(r.approxTokens)} tok · {num(r.chars)} chars</span> : live ? <span>running…</span> : <span>no result</span>}
+                    {r ? <CallTokens cost={costs.calls[it.id]} chars={r.chars} live={live} /> : live ? <span>running…</span> : <span>no result</span>}
                   </span>
                 </div>
                 <div className="tx-body">

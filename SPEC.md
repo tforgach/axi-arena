@@ -285,6 +285,7 @@ Charts use hand-written SVG with the dataviz reference palette, validated for li
 | **Runs** | List of runs: pack, AXI version, models, status, Arena Score, date. |
 | **Run overview** | Task × model grid of match scores (colored cells, ✗ for gate failures, "n.s." for not significant). Live progress while running. |
 | **Match detail** | AXI vs baseline, side by side: metric medians with CIs, per-trial rows, check results and judge reasoning. |
+| **Where the tokens go** (in match detail) | Per arm: starting context (system prompt, tools, skills, hooks), then each kind of command (`axi-fetch --full`, `WebFetch`, `Read`, …) with calls per trial and **measured** tokens per call. Measured means how much the next API call's prompt grew, from per-message usage. Side-model tokens (e.g. WebFetch's summarizer) are attributed to their calls when the side model differs from the trial model. |
 | **Trial transcript** | Live-streamed message by message: the assistant's text, tool calls paired with their outputs (with approximate sizes), hook output, escape attempts highlighted with the lockdown's reason, and the final answer. Also shows the checks, the judgment, and token usage per model. |
 | **Pack history** | Arena Score and key metrics over time and across AXI versions, to catch regressions. |
 

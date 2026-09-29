@@ -166,10 +166,31 @@ export type TranscriptItem =
   | { kind: "tool_result"; seq: number; id: string; isError: boolean; escape: boolean; text: string; chars: number; approxTokens: number }
   | { kind: "result"; seq: number; subtype: string; text: string | null; turns: number; durationMs: number };
 
+export interface CallCost {
+  /** Tokens this call's result added to the next API call's prompt (measured). */
+  contextTokens: number | null;
+  /** Side-model tokens attributed to this call (e.g. WebFetch's summarizer). */
+  sideTokens: number;
+}
+
+export interface CostBreakdown {
+  baseContext: number | null;
+  finalContext: number | null;
+  calls: Record<string, CallCost>;
+}
+
 export interface TrialPayload {
   trial: Trial;
   items: TranscriptItem[];
+  costs: CostBreakdown;
   lastSeq: number;
+}
+
+export interface ArmCommands {
+  trials: number;
+  baseContext: number | null;
+  finalContext: number | null;
+  commands: { label: string; callsPerTrial: number; contextTokens: number | null; sideTokens: number | null }[];
 }
 
 export interface HistoryPoint {

@@ -67,10 +67,10 @@ export function useTrial(id: string): Loadable<TrialPayload> {
         if (!live) return;
         es = new EventSource(`/api/trials/${id}/stream?after=${data.lastSeq}`);
         es.addEventListener("items", (e) => {
-          const { items, lastSeq } = JSON.parse((e as MessageEvent).data) as Pick<TrialPayload, "items" | "lastSeq">;
+          const { items, lastSeq, costs } = JSON.parse((e as MessageEvent).data) as Pick<TrialPayload, "items" | "lastSeq" | "costs">;
           if (lastSeq <= seen.current) return;
           seen.current = lastSeq;
-          setState((s) => (s.data ? { ...s, data: { ...s.data, items: [...s.data.items, ...items], lastSeq } } : s));
+          setState((s) => (s.data ? { ...s, data: { ...s.data, items: [...s.data.items, ...items], lastSeq, costs } } : s));
         });
         es.addEventListener("trial", (e) => {
           const trial = JSON.parse((e as MessageEvent).data) as Trial;

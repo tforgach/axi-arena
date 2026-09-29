@@ -14,4 +14,5 @@ export * from "./transcript.ts";
 export * from "./certs.ts";
 export * from "./fixtures.ts";
 export * from "./proxy.ts";
+export * from "./callCosts.ts";
 export * from "./paths.ts";

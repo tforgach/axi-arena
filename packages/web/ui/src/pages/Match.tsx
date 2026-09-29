@@ -5,6 +5,7 @@ import { Correct, Loading, StatusPill } from "../components/common.tsx";
 import { MetricBars } from "../components/MetricBars.tsx";
 import { divergingFill } from "../components/ScoreGrid.tsx";
 import { navigate } from "../router.ts";
+import { TokenFlow } from "../components/TokenFlow.tsx";
 
 function ArmTrials({ title, trials }: { title: string; trials: Trial[] }) {
   return (
@@ -109,6 +110,9 @@ export function MatchPage({ runId, task, model, vs }: { runId: string; task: str
       <div className="card" style={{ padding: 0 }}>
         <SummaryTable axi={m.axi} base={m.base} baseline={vs} />
       </div>
+
+      <h2>Where the tokens go</h2>
+      <TokenFlow runId={runId} task={task} model={model} arms={["axi", vs]} />
 
       <h2>Trials</h2>
       <div className="grid-2">

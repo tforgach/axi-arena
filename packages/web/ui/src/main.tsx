@@ -7,6 +7,7 @@ import { RunPage } from "./pages/Run.tsx";
 import { MatchPage } from "./pages/Match.tsx";
 import { TrialPage } from "./pages/Trial.tsx";
 import { HistoryPage } from "./pages/History.tsx";
+import { Logo } from "./components/Logo.tsx";
 
 type Theme = "system" | "light" | "dark";
 
@@ -52,7 +53,7 @@ function App() {
   return (
     <>
       <header className="topbar">
-        <a className="brand" href="#/">axi-arena</a>
+        <Logo />
         <Crumbs route={route} />
         <button className="theme-toggle" onClick={() => setTheme(next[theme])} title="Theme">
           {theme === "system" ? "◐ system" : theme === "light" ? "☀ light" : "☾ dark"}

@@ -7,7 +7,7 @@ import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
-  ManifestSchema, computeScoreboard, getRun, getTrial, listRuns, openDb, packRuns, runTrials, transcriptItems,
+  ManifestSchema, callCosts, commandLabel, computeScoreboard, median, getRun, getTrial, listRuns, openDb, packRuns, runTrials, transcriptItems,
   trialEventsSince, type Db, type RunRow, type ScoringConfig, type TrialRow,
 } from "@axi-arena/core";
 
@@ -75,9 +75,63 @@ function runListItem(db: Db, run: RunRow) {
   };
 }
 
+function trialEvents(db: Db, trialId: string) {
+  return trialEventsSince(db, trialId, -1).map((e) => ({ seq: e.seq, msg: JSON.parse(e.json) as SDKMessage }));
+}
+
 function trialPayload(db: Db, t: TrialRow) {
-  const events = trialEventsSince(db, t.id, -1).map((e) => ({ seq: e.seq, msg: JSON.parse(e.json) as SDKMessage }));
-  return { trial: trialSummary(t), items: transcriptItems(events), lastSeq: events.at(-1)?.seq ?? -1 };
+  const events = trialEvents(db, t.id);
+  return {
+    trial: trialSummary(t),
+    items: transcriptItems(events),
+    costs: callCosts(events.map((e) => e.msg)),
+    lastSeq: events.at(-1)?.seq ?? -1,
+  };
+}
+
+/** Where each arm's tokens went in one match: base context, then per command (measured). */
+function commandBreakdown(db: Db, trials: TrialRow[]) {
+  const arms = new Map<string, { base: number[]; final: number[]; calls: Map<string, { context: number[]; side: number[]; perTrial: number[] }> }>();
+  const byArm = new Map<string, TrialRow[]>();
+  for (const t of trials) byArm.set(t.arm, [...(byArm.get(t.arm) ?? []), t]);
+  for (const [arm, ts] of byArm) {
+    const acc = { base: [] as number[], final: [] as number[], calls: new Map<string, { context: number[]; side: number[]; perTrial: number[] }>() };
+    for (const t of ts) {
+      const msgs = trialEvents(db, t.id).map((e) => e.msg);
+      const costs = callCosts(msgs);
+      if (costs.baseContext != null) acc.base.push(costs.baseContext);
+      if (costs.finalContext != null) acc.final.push(costs.finalContext);
+      const seen = new Map<string, number>();
+      for (const it of transcriptItems(msgs.map((msg, seq) => ({ seq, msg })))) {
+        if (it.kind !== "tool_call") continue;
+        const label = commandLabel(it.name, it.input);
+        const c = costs.calls[it.id];
+        const slot = acc.calls.get(label) ?? { context: [], side: [], perTrial: [] };
+        if (c?.contextTokens != null) slot.context.push(c.contextTokens);
+        if (c?.sideTokens) slot.side.push(c.sideTokens);
+        acc.calls.set(label, slot);
+        seen.set(label, (seen.get(label) ?? 0) + 1);
+      }
+      for (const [label, slot] of acc.calls) slot.perTrial.push(seen.get(label) ?? 0);
+    }
+    arms.set(arm, acc);
+  }
+  return Object.fromEntries(
+    [...arms].map(([arm, a]) => [
+      arm,
+      {
+        trials: byArm.get(arm)!.length,
+        baseContext: median(a.base),
+        finalContext: median(a.final),
+        commands: [...a.calls].map(([label, s]) => ({
+          label,
+          callsPerTrial: s.perTrial.reduce((x, y) => x + y, 0) / byArm.get(arm)!.length,
+          contextTokens: median(s.context),
+          sideTokens: median(s.side),
+        })).sort((x, y) => (y.contextTokens ?? 0) * y.callsPerTrial - (x.contextTokens ?? 0) * x.callsPerTrial),
+      },
+    ]),
+  );
 }
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
@@ -116,6 +170,13 @@ export function createApp(db: Db = openDb()): Hono {
     }),
   );
 
+  app.get("/api/runs/:id/commands", (c) => {
+    const task = c.req.query("task");
+    const model = c.req.query("model");
+    const trials = runTrials(db, c.req.param("id")).filter((t) => t.task_id === task && t.model === model && !isLive(t.status));
+    return c.json(commandBreakdown(db, trials));
+  });
+
   app.get("/api/trials/:id", (c) => {
     const t = getTrial(db, c.req.param("id"));
     return t ? c.json(trialPayload(db, t)) : c.json({ error: "trial not found" }, 404);
@@ -135,7 +196,9 @@ export function createApp(db: Db = openDb()): Hono {
         const events = trialEventsSince(db, id, lastSeq).map((e) => ({ seq: e.seq, msg: JSON.parse(e.json) as SDKMessage }));
         if (events.length) {
           lastSeq = events.at(-1)!.seq;
-          await stream.writeSSE({ event: "items", data: JSON.stringify({ items: transcriptItems(events), lastSeq }) });
+          // Costs need the next API call to measure, so they're recomputed over the whole stream.
+          const costs = callCosts(trialEvents(db, id).map((e) => e.msg));
+          await stream.writeSSE({ event: "items", data: JSON.stringify({ items: transcriptItems(events), lastSeq, costs }) });
         }
         const summary = JSON.stringify(trialSummary(t));
         if (summary !== lastTrial) {

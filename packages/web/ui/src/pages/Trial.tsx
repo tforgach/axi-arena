@@ -7,6 +7,9 @@ export function TrialPage({ id }: { id: string }) {
   const { data, error, live } = useTrial(id);
   if (!data) return <Loading error={error} />;
   const t = data.trial;
+  // While running, count escapes from the transcript so the tile agrees with what's shown below.
+  const liveEscapes = data.items.filter((i) => i.kind === "tool_result" && i.escape).length;
+  const escapes = t.escape_attempts ?? (live ? liveEscapes : null);
 
   return (
     <>
@@ -34,7 +37,7 @@ export function TrialPage({ id }: { id: string }) {
         <div className="card tile"><div className="label">Tokens, cost-weighted</div><div className="value">{compact(t.tokens_weighted)}</div><div className="note">{num(t.tokens_total)} raw</div></div>
         <div className="card tile"><div className="label">Turns · tool calls</div><div className="value">{t.num_turns ?? "–"} · {t.tool_calls ?? "–"}</div><div className="note">{t.error_recoveries ?? 0} error recoveries · {t.tool_errors ?? 0} errors</div></div>
         <div className="card tile"><div className="label">Time</div><div className="value">{secs(t.duration_ms)}</div><div className="note">{secs(t.duration_api_ms)} in API calls</div></div>
-        <div className="card tile"><div className="label">Escape attempts</div><div className={`value${t.escape_attempts ? " bad" : ""}`}>{t.escape_attempts ?? "–"}</div><div className="note">calls denied by lockdown</div></div>
+        <div className="card tile"><div className="label">Escape attempts</div><div className={`value${escapes ? " bad" : ""}`}>{escapes ?? "–"}</div><div className="note">{t.escape_attempts == null && live ? "so far · " : ""}reached for an equivalent tool</div></div>
       </div>
 
       {t.error && <div className="error-box" style={{ marginTop: 16 }}>{t.error}</div>}
@@ -94,7 +97,13 @@ export function TrialPage({ id }: { id: string }) {
       )}
 
       <h2>Transcript {live && <span className="pill running" style={{ marginLeft: 6 }}><span className="dot" />live</span>}</h2>
-      {data.items.length ? <Transcript items={data.items} live={live} /> : <div className="empty">{live ? "Waiting for the agent to start…" : "No events recorded."}</div>}
+      {data.costs.baseContext != null && (
+        <div className="muted small" style={{ marginBottom: 8 }}>
+          Started with <b>{num(data.costs.baseContext)}</b> tokens of context (system prompt, tool definitions, skills, hooks)
+          {data.costs.finalContext != null && <>; ended at <b>{num(data.costs.finalContext)}</b></>}. Each call below shows what it added.
+        </div>
+      )}
+      {data.items.length ? <Transcript items={data.items} live={live} costs={data.costs} /> : <div className="empty">{live ? "Waiting for the agent to start…" : "No events recorded."}</div>}
     </>
   );
 }
