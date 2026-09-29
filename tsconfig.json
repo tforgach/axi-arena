@@ -9,7 +9,15 @@
     "erasableSyntaxOnly": true,
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ]
   },
-  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts"]
+  "include": [
+    "packages/core/src/**/*.ts",
+    "packages/core/test/**/*.ts",
+    "packages/cli/src/**/*.ts",
+    "packages/web/src/**/*.ts",
+    "packages/web/test/**/*.ts"
+  ]
 }

@@ -177,6 +177,22 @@ export function trialEvents(db: Db, trialId: string): unknown[] {
   );
 }
 
+/** Events after `afterSeq`, for live streaming. */
+export function trialEventsSince(db: Db, trialId: string, afterSeq: number): { seq: number; json: string }[] {
+  return db.prepare(`SELECT seq, json FROM events WHERE trial_id = ? AND seq > ? ORDER BY seq`).all(trialId, afterSeq) as {
+    seq: number;
+    json: string;
+  }[];
+}
+
+export function getTrial(db: Db, trialId: string): TrialRow | undefined {
+  return db.prepare(`SELECT * FROM trials WHERE id = ?`).get(trialId) as unknown as TrialRow | undefined;
+}
+
+export function packRuns(db: Db, packName: string, limit = 50): RunRow[] {
+  return db.prepare(`SELECT * FROM runs WHERE pack_name = ? ORDER BY started_at DESC LIMIT ?`).all(packName, limit) as unknown as RunRow[];
+}
+
 export function getRun(db: Db, runId: string): RunRow | undefined {
   return db.prepare(`SELECT * FROM runs WHERE id = ?`).get(runId) as unknown as RunRow | undefined;
 }

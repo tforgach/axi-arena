@@ -8,6 +8,7 @@ import {
   median, openDb, planTrials, rescoreRun, runTrials,
   type Db, type Effort, type Match, type Pack, type RunOptions, type ScoringConfig, type TrialRow,
 } from "@axi-arena/core";
+import { DEFAULT_PORT, serverRunning, startServer } from "@axi-arena/web";
 
 const USAGE = `axi-arena — benchmark an AXI against its native counterpart
 
@@ -18,6 +19,7 @@ Usage:
   axi-arena list                     Recent runs
   axi-arena show <run-id> [--detail] Scoreboard for a run (--detail adds per-arm metrics)
   axi-arena rescore <run-id>         Re-grade a run from stored transcripts (no agent re-run)
+  axi-arena serve [--port N]         Web app: live trials, scoreboards, history (default port ${DEFAULT_PORT})
 
 Run flags:
   --models a,b         Models to run (default: pack defaults.models)
@@ -48,6 +50,7 @@ const { values: flags, positionals } = parseArgs({
     "judge-model": { type: "string" },
     "no-judge": { type: "boolean", default: false },
     detail: { type: "boolean", default: false },
+    port: { type: "string" },
     keep: { type: "boolean", default: false },
     yes: { type: "boolean", short: "y", default: false },
     help: { type: "boolean", short: "h", default: false },
@@ -241,10 +244,17 @@ async function cmdRun(): Promise<void> {
 
   let done = 0;
   let total = 0;
+  const port = positiveInt(flags.port, DEFAULT_PORT, "port");
+  const webUp = await serverRunning(port);
   const runId = await executeRun(db, pack, opts, {
     onRunStart: (id, planned) => {
       total = planned.length;
-      console.log(`\nrun ${id}\n`);
+      console.log(`\nrun ${id}`);
+      console.log(
+        webUp
+          ? `watch live: http://127.0.0.1:${port}/#/runs/${id}\n`
+          : `watch live: start \`axi-arena serve\` in another terminal, then open http://127.0.0.1:${port}/#/runs/${id}\n`,
+      );
     },
     onTrialEnd: (t, o, g) => {
       done++;
@@ -304,6 +314,13 @@ function cmdShow(): void {
   printScoreboard(trials, runScoring(db, target!));
 }
 
+async function cmdServe(): Promise<void> {
+  const port = positiveInt(flags.port, DEFAULT_PORT, "port");
+  if (await serverRunning(port)) die(`something is already serving axi-arena on port ${port}`, 1);
+  const info = await startServer(port);
+  console.log(`axi-arena web app: http://127.0.0.1:${info.port}/  (Ctrl-C to stop)`);
+}
+
 async function cmdRescore(): Promise<void> {
   const db = openDb();
   runTrialsOrDie(db);
@@ -333,5 +350,6 @@ switch (cmd) {
   case "list": cmdList(); break;
   case "show": cmdShow(); break;
   case "rescore": await cmdRescore(); break;
+  case "serve": await cmdServe(); break;
   default: die(`unknown command "${cmd}"\n\n${USAGE}`, 2);
 }

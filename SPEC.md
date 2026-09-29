@@ -263,18 +263,26 @@ axi-arena list [runs|packs]
 axi-arena rescore <run-id> [--judge-model id] [--no-judge]  # re-grade from stored transcripts using the pack's *current* task definitions; script checks reuse their original results
 ```
 
-`run` prints a URL to the live run view right away, and a summary table at the end.
+`run` prints a link to the live run view right away if `axi-arena serve` is running (otherwise it says to start it), and a scoreboard at the end. The server is a separate long-lived process rather than started by `run`, so the page doesn't disappear when a run ends. *(Decided in M3.)*
+
+```
+axi-arena serve [--port 4477]   # web app on 127.0.0.1 only
+npm run build                   # build the UI once (packages/web/dist)
+npm run dev:web                 # UI dev server with hot reload, proxying /api to `serve`
+```
 
 ## 11. Web app
 
-Local only (`127.0.0.1`). It reads from SQLite and streams live updates over SSE.
+Local only (`127.0.0.1`). It reads the same SQLite DB the CLI writes (WAL mode), so a run in one terminal is visible live in the browser. The server polls the DB and pushes changes over SSE: run state every 1s, new transcript events every 0.5s. Hash routing: `#/runs/<id>`, `#/runs/<id>/match?task=&model=&vs=`, `#/trials/<id>`, `#/packs/<name>`.
+
+Charts use hand-written SVG with the dataviz reference palette, validated for light and dark mode. The score colors are a diverging blue (AXI better) ↔ red (AXI worse) scale with a gray midpoint; model series use fixed categorical slots 1–3. Every value is visible without hovering, and tooltips only add detail. The history chart has a table view.
 
 | View | Contents |
 |---|---|
 | **Runs** | List of runs: pack, AXI version, models, status, Arena Score, date. |
 | **Run overview** | Task × model grid of match scores (colored cells, ✗ for gate failures, "n.s." for not significant). Live progress while running. |
 | **Match detail** | AXI vs baseline, side by side: metric medians with CIs, per-trial rows, check results and judge reasoning. |
-| **Trial transcript** | Live-streamed message by message: the assistant's text, tool calls and tool outputs (with token counts), escape attempts highlighted, and final answer plus grading. |
+| **Trial transcript** | Live-streamed message by message: the assistant's text, tool calls paired with their outputs (with approximate sizes), hook output, escape attempts highlighted with the lockdown's reason, and the final answer. Also shows the checks, the judgment, and token usage per model. |
 | **Pack history** | Arena Score and key metrics over time and across AXI versions, to catch regressions. |
 
 ## 12. Architecture and stack (proposed)
@@ -282,7 +290,7 @@ Local only (`127.0.0.1`). It reads from SQLite and streams live updates over SSE
 - **TypeScript on Node ≥24, npm workspaces.** Node runs the `.ts` files directly, so there's no build step; `tsc` is only used for typechecking. (The plan said pnpm, but it isn't installed and npm is enough.)
   - `packages/core`: pack schema (zod), runner, proxy, checks, judge, scoring, and the DB layer.
   - `packages/cli`: the `axi-arena` binary.
-  - `packages/web`: the web app. Vite + React UI, served by a small Hono server with SSE.
+  - `packages/web`: the web app. Vite + React UI in `ui/`, built to `dist/` and served with the JSON/SSE API by a small Hono server (`src/server.ts`).
 - **SQLite** (built-in `node:sqlite`) at `~/.axi-arena/arena.db` (`AXI_ARENA_HOME` overrides the location). Tables: `runs`, `trials`, `events` (raw SDK messages, append-only), `checks`, `judgments`, `matches`.
 - Raw SDK messages are stored in full, so `rescore` and future metrics never need a re-run.
 
@@ -293,7 +301,7 @@ Local only (`127.0.0.1`). It reads from SQLite and streams live updates over SSE
 | **M0** ✅ | Spike: de-risk (done 2026-09-29, see `spike/`) | Confirmed: (a) SDK runs on the subscription login, or the `cli` fallback is wired up instead, (b) strict lockdown works (`tools` + `dontAsk` + hook), (c) injecting skills and hooks per trial with `settingSources: []`, (d) whether `WebFetch` traffic goes through a local proxy, (e) `modelUsage` captures WebFetch's side-model tokens, (f) how to pin effort in each backend. |
 | **M1** ✅ | Runner + CLI + SQLite (done 2026-09-29) | `axi-arena run packs/axi-fetch` runs isolated trials for both arms and stores metrics. |
 | **M2** ✅ | Checks + judge + scoring (done 2026-09-29) | Correctness, Arena Score and CIs in the CLI summary; `rescore` works. |
-| **M3** | Web app | Runs, run overview, match detail, live transcripts. |
+| **M3** ✅ | Web app (done 2026-09-29) | Runs, run overview, match detail, live transcripts. |
 | **M4** | Replay | Record/replay proxy, synthetic fixtures, fixture-miss detection. |
 | **M5** | Matrix + history + side effects | Multiple models per run, pack history view, `sequential`, before/after hooks. Validated on one private work AXI. |
 | v2 | Later | Adoption arm (both tools available), other providers, CI mode (fail on score regression). |
@@ -307,7 +315,7 @@ _None open right now._
 - Token metric: cost-weighted tokens are scored, and the plain sum is shown next to them (§6.1).
 - Gate: min correctness 0.8, max regression 0.05 (§6.3).
 - Pack discovery: path, plus an optional name registry in `~/.axi-arena/config.yaml`.
-- Tool-output tokens: local tokenizer estimate; headline totals come from SDK usage.
+- Tool-output tokens: shown as a rough chars/4 estimate in the transcript; scored totals come from SDK usage.
 - Auth: SDK on the subscription first, falling back to the `cli` backend (§4.4).
 - Judge: a cheap pinned model, default `claude-haiku-4-5` (§6.2).
 - Effort: fixed per run, not a matrix dimension (§9).
