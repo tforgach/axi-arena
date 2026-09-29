@@ -38,15 +38,20 @@ export function fixtureKey(method: string, url: string, body?: Buffer): string {
   return createHash("sha256").update(`${method.toUpperCase()} ${canonicalUrl(url)} ${bodyHash}`).digest("hex").slice(0, 20);
 }
 
-const HOP_BY_HOP = new Set([
-  "connection", "keep-alive", "proxy-authenticate", "proxy-authorization", "te", "trailer", "transfer-encoding",
-  "upgrade", "content-length", "content-encoding",
+/**
+ * Response headers kept in recorded fixtures. An allowlist, not a blocklist: servers echo
+ * private data back in headers (Wikipedia's `x-client-ip` is the recorder's public IP; CDN
+ * `x-served-by`/`server-timing` reveal location), and fixtures get committed with the pack.
+ */
+export const STORED_HEADERS = new Set([
+  "content-type", "content-language", "location", "last-modified", "etag", "cache-control",
+  "expires", "link", "content-disposition", "retry-after", "www-authenticate",
 ]);
 
 export function storableHeaders(h: Record<string, string | string[] | undefined>): Record<string, string> {
   const out: Record<string, string> = {};
   for (const [k, v] of Object.entries(h)) {
-    if (v == null || HOP_BY_HOP.has(k.toLowerCase()) || k.toLowerCase() === "set-cookie") continue;
+    if (v == null || !STORED_HEADERS.has(k.toLowerCase())) continue;
     out[k.toLowerCase()] = Array.isArray(v) ? v.join(", ") : v;
   }
   return out;

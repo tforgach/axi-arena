@@ -8,7 +8,7 @@ import { join } from "node:path";
 import type { AddressInfo } from "node:net";
 import { promisify } from "node:util";
 import { ensureCa } from "../src/certs.ts";
-import { FixtureStore } from "../src/fixtures.ts";
+import { FixtureStore, storableHeaders } from "../src/fixtures.ts";
 import { isPassthrough, proxyEnv, startProxy } from "../src/proxy.ts";
 
 const run = promisify(execFile);
@@ -93,6 +93,16 @@ test("record fetches and saves misses; replay then serves them with the upstream
   } finally {
     await replay.close();
   }
+});
+
+test("recorded fixtures keep only allowlisted headers (no client IPs, cookies, CDN nodes)", () => {
+  assert.deepEqual(
+    storableHeaders({
+      "Content-Type": "text/html", location: "/x", "x-client-ip": "2001:db8::1", "set-cookie": ["a=b"],
+      "x-served-by": "cache-lga", "server-timing": "host;desc=cp1", "x-request-id": "r", "content-encoding": "gzip",
+    }),
+    { "content-type": "text/html", location: "/x" },
+  );
 });
 
 test("fixtures.yaml validates entries and supports body_file", () => {

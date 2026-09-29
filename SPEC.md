@@ -302,7 +302,7 @@ Charts use hand-written SVG with the dataviz reference palette, validated for li
 
 | # | Milestone | Done when |
 |---|---|---|
-| **M0** ✅ | Spike: de-risk (done 2026-09-29, see `spike/`) | Confirmed: (a) SDK runs on the subscription login, or the `cli` fallback is wired up instead, (b) strict lockdown works (`tools` + `dontAsk` + hook), (c) injecting skills and hooks per trial with `settingSources: []`, (d) whether `WebFetch` traffic goes through a local proxy, (e) `modelUsage` captures WebFetch's side-model tokens, (f) how to pin effort in each backend. |
+| **M0** ✅ | Spike: de-risk (done 2026-09-29; throwaway scripts kept locally in `spike/`, not in the repo) | Confirmed: (a) SDK runs on the subscription login, or the `cli` fallback is wired up instead, (b) strict lockdown works (`tools` + `dontAsk` + hook), (c) injecting skills and hooks per trial with `settingSources: []`, (d) whether `WebFetch` traffic goes through a local proxy, (e) `modelUsage` captures WebFetch's side-model tokens, (f) how to pin effort in each backend. |
 | **M1** ✅ | Runner + CLI + SQLite (done 2026-09-29) | `axi-arena run packs/axi-fetch` runs isolated trials for both arms and stores metrics. |
 | **M2** ✅ | Checks + judge + scoring (done 2026-09-29) | Correctness, Arena Score and CIs in the CLI summary; `rescore` works. |
 | **M3** ✅ | Web app (done 2026-09-29) | Runs, run overview, match detail, live transcripts. |

@@ -12,3 +12,6 @@ dist/
 *.p12
 certs/
 packages/web/dist/
+
+# M0 de-risking spike: throwaway scripts, kept out of the repo
+spike/

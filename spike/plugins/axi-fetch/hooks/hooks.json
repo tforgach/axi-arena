@@ -1,7 +1,0 @@
-{
-  "hooks": {
-    "SessionStart": [
-      { "hooks": [ { "type": "command", "command": "echo 'ARENA_AMBIENT_MARKER: axi-fetch is installed; use `axi-fetch <url>` to read web pages.'" } ] }
-    ]
-  }
-}
