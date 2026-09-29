@@ -1,0 +1,10 @@
+{
+  "name": "axi-arena-spike",
+  "private": true,
+  "type": "module",
+  "description": "M0 throwaway spike: de-risk SDK auth, lockdown, injection, proxy, usage",
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "^0.3.285",
+    "@tforgach/axi-fetch": "^0.1.1"
+  }
+}
