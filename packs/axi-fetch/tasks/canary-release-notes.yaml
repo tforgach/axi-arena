@@ -1,0 +1,14 @@
+id: canary-release-notes
+prompt: >
+  According to the release notes at https://example.com/arena/tidewright/release-notes,
+  in which Tidewright version was the --strict-tides flag added, and what is its default?
+  Answer in one sentence.
+tags: [canary, deep-content]
+network: replay            # synthetic page; only exists in fixtures
+checks:
+  - { type: regex, pattern: '4\.7\.0|4\.7\b', required: true }
+  - { type: contains, value: "false", required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Correct if it says the flag was added in 4.7.0 and defaults to false (off).
+  reference: It was added in Tidewright 4.7.0 and defaults to false.

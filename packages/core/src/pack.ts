@@ -36,6 +36,7 @@ const CheckSchema = z.discriminatedUnion("type", [
 export type Check = z.infer<typeof CheckSchema>;
 
 const Network = z.enum(["replay", "record", "live"]);
+export type Network = z.infer<typeof Network>;
 
 export const TaskSchema = z.object({
   id: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "task ids are kebab-case"),
@@ -156,6 +157,8 @@ function validateReferences(pack: Pack): void {
 export function packPath(pack: Pack, rel: string): string {
   return isAbsolute(rel) ? rel : join(pack.dir, rel);
 }
+
+export const fixtureDir = (pack: Pack, taskId: string) => join(pack.dir, "fixtures", taskId);
 
 export function baselineArms(pack: Pack): string[] {
   return Object.keys(pack.arms).filter((a) => a !== "axi");

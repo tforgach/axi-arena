@@ -1,0 +1,11 @@
+{
+  "method": "GET",
+  "url": "https://docs.python.org/3/library/asyncio-task.html",
+  "status": 200,
+  "headers": {
+    "content-type": "text/html",
+    "last-modified": "Tue, 29 Sep 2026 16:59:11 GMT",
+    "etag": "\"6abbee5f-2b5e7\""
+  },
+  "recorded_at": "2026-09-29T22:02:52.979Z"
+}

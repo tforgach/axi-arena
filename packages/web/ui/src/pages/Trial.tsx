@@ -18,6 +18,12 @@ export function TrialPage({ id }: { id: string }) {
             <span>{t.model}</span>
             <span>trial #{t.trial_index}</span>
             <StatusPill status={t.status} />
+            {t.network && (
+              <span title="network mode">
+                network <b>{t.network}</b>
+                {t.proxy && ` · ${t.proxy.hits} fixture hit(s)${t.proxy.recorded ? ` · ${t.proxy.recorded} recorded` : ""}`}
+              </span>
+            )}
             <a href={`#/runs/${t.run_id}`}>run →</a>
           </div>
         </div>
@@ -32,6 +38,13 @@ export function TrialPage({ id }: { id: string }) {
       </div>
 
       {t.error && <div className="error-box" style={{ marginTop: 16 }}>{t.error}</div>}
+      {t.proxy && t.proxy.misses.length > 0 && (
+        <div className="card" style={{ marginTop: 16, borderColor: "var(--warning)" }}>
+          <h3>⚠ {t.fixture_misses} request(s) had no fixture</h3>
+          <div className="small muted" style={{ marginBottom: 6 }}>The agent got HTTP 599 for these, so this trial isn't fully reproducible. Fill the gap with <code>axi-arena record</code>.</div>
+          {t.proxy.misses.map((m, i) => <div key={i} className="mono small">{m.method} {m.url}{m.detail ? ` — ${m.detail}` : ""}</div>)}
+        </div>
+      )}
 
       <div className="grid-2" style={{ marginTop: 16 }}>
         <div className="card">

@@ -1,0 +1,16 @@
+id: canary-status-table
+prompt: >
+  Using https://example.com/arena/tidewright/status, list every region whose status is
+  "Degraded", with the note for each.
+tags: [canary, table]
+network: replay            # synthetic page; only exists in fixtures
+checks:
+  - { type: contains, value: East Shoals, required: true }
+  - { type: contains, value: Kelp Point, required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: >
+    Correct if it lists exactly East Shoals (sensor lag up to 40 min) and Kelp Point
+    (intermittent readings) as degraded. Listing West Narrows (maintenance) or any
+    operational region as degraded is wrong.
+  reference: East Shoals — sensor lag up to 40 min; Kelp Point — intermittent readings.

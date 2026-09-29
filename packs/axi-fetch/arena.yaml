@@ -12,7 +12,7 @@ defaults:
   max_turns: 20
   timeout_s: 180
   effort: medium
-  network: live            # replay arrives in M4
+  network: replay          # fixtures in fixtures/<task>/; refresh with `axi-arena record`
 
 arms:
   axi:

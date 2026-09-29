@@ -1,0 +1,12 @@
+{
+  "method": "GET",
+  "url": "https://en.wikipedia.org/wiki/Token_bucket",
+  "status": 200,
+  "headers": {
+    "content-language": "en",
+    "last-modified": "Tue, 29 Sep 2026 19:00:58 GMT",
+    "content-type": "text/html; charset=UTF-8",
+    "cache-control": "private, s-maxage=0, max-age=0, must-revalidate, no-transform"
+  },
+  "recorded_at": "2026-09-29T22:02:59.353Z"
+}

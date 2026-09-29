@@ -55,6 +55,9 @@ export interface Trial {
   tokens: Record<string, ModelTokens> | null;
   checks: CheckResult[] | null;
   judgment: Judgment | null;
+  network: "replay" | "record" | "live" | null;
+  fixture_misses: number | null;
+  proxy: { hits: number; recorded: number; passthrough: number; misses: { method: string; url: string; detail?: string }[] } | null;
 }
 
 export interface ArmSummary {

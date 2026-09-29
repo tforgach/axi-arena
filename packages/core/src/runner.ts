@@ -9,7 +9,10 @@ import { scriptRunner } from "./checks.ts";
 import { appendEvent, finishRun, finishTrial, insertRun, insertTrial, setGrade, startTrial, type Db, type TrialOutcome } from "./db.ts";
 import { gradeTrial, type Grade } from "./grading.ts";
 import { computeMetrics } from "./metrics.ts";
-import { packPath, type Effort, type Pack, type Task } from "./pack.ts";
+import { ensureCa } from "./certs.ts";
+import { FixtureStore } from "./fixtures.ts";
+import { fixtureDir, packPath, type Effort, type Network, type Pack, type Task } from "./pack.ts";
+import { proxyEnv, startProxy, type ProxyHandle } from "./proxy.ts";
 import { runDir as makeRunDir } from "./paths.ts";
 
 export interface RunOptions {
@@ -24,7 +27,13 @@ export interface RunOptions {
   keep: boolean;
   judgeModel: string;
   useJudge: boolean;
+  /** Overrides every task's network mode (e.g. `record`). */
+  network?: Network;
 }
+
+/** Effective network mode for a task: run override → task → pack default. */
+export const taskNetwork = (pack: Pack, task: Task, opts: Pick<RunOptions, "network">): Network =>
+  opts.network ?? task.network ?? pack.defaults.network;
 
 export interface PlannedTrial {
   id: string;
@@ -155,6 +164,16 @@ export async function executeRun(db: Db, pack: Pack, opts: RunOptions, hooks: Ru
   }
 }
 
+function proxySummary(p: ProxyHandle) {
+  const count = (k: string) => p.events.filter((e) => e.kind === k).length;
+  return {
+    hits: count("hit"),
+    recorded: count("recorded"),
+    passthrough: count("passthrough"),
+    misses: p.misses().slice(0, 20).map((e) => ({ method: e.method, url: e.url, detail: e.detail })),
+  };
+}
+
 async function runTrial(
   db: Db,
   pack: Pack,
@@ -169,15 +188,29 @@ async function runTrial(
   const empty: TrialOutcome = {
     status: "error", result_text: null, sdk_subtype: null, num_turns: null, tool_calls: null, tool_errors: null, error_recoveries: null,
     escape_attempts: null, duration_ms: null, duration_api_ms: null, tokens_total: null, tokens_weighted: null, tokens_json: null,
-    cost_usd: null, error: null,
+    cost_usd: null, error: null, network: null, fixture_misses: null, proxy_json: null,
   };
+  const network = taskNetwork(pack, t.task, opts);
   const scriptEnv = { ...arenaVars, ARENA_TRIAL_ID: t.id, ARENA_ARM: t.arm, ARENA_MODEL: t.model, ARENA_TRIAL_DIR: trialDir };
 
   if (t.task.before) {
     try {
       runScript(pack, t.task.before, scriptEnv, log);
     } catch (e) {
-      return { outcome: { ...empty, status: "setup_error", error: e instanceof Error ? e.message : String(e) }, grade: null };
+      return { outcome: { ...empty, network, status: "setup_error", error: e instanceof Error ? e.message : String(e) }, grade: null };
+    }
+  }
+
+  // Replay/record: a proxy per trial, so concurrent trials of different tasks never share fixtures.
+  let proxy: ProxyHandle | null = null;
+  let extraEnv: Record<string, string> = {};
+  if (network !== "live") {
+    try {
+      const ca = ensureCa();
+      proxy = await startProxy({ mode: network, store: new FixtureStore(fixtureDir(pack, t.task.id)), ca });
+      extraEnv = proxyEnv(proxy, ca);
+    } catch (e) {
+      return { outcome: { ...empty, network, status: "setup_error", error: `replay proxy: ${e instanceof Error ? e.message : e}` }, grade: null };
     }
   }
 
@@ -193,7 +226,7 @@ async function runTrial(
   try {
     const options = buildQueryOptions({
       pack, armName: t.arm, plugin, trialDir, model: t.model, effort: opts.effort,
-      maxTurns: opts.maxTurns, abortController, denials,
+      maxTurns: opts.maxTurns, abortController, denials, extraEnv,
     });
     let seq = 0;
     for await (const msg of query({ prompt: t.task.prompt, options })) {
@@ -206,6 +239,7 @@ async function runTrial(
     clearTimeout(timer);
     signal?.removeEventListener("abort", onAbort);
     cleanupClaudeProjectDir(trialWorkDir(trialDir));
+    await proxy?.close();
   }
 
   const m = computeMetrics(messages, denials);
@@ -240,6 +274,9 @@ async function runTrial(
     tokens_json: JSON.stringify(m.tokensByModel),
     cost_usd: m.costUsd,
     error: timedOut ? `timed out after ${opts.timeoutS}s` : error,
+    network,
+    fixture_misses: proxy ? proxy.misses().length : null,
+    proxy_json: proxy ? JSON.stringify(proxySummary(proxy)) : null,
   };
   return { outcome, grade };
 }

@@ -41,6 +41,9 @@ CREATE TABLE IF NOT EXISTS trials (
   tokens_total     INTEGER,
   tokens_weighted  INTEGER,             -- scored: cost-weighted input-token equivalents
   tokens_json      TEXT,                -- per-model usage breakdown
+  network          TEXT,                -- replay | record | live
+  fixture_misses   INTEGER,             -- replay requests with no fixture (harness gap)
+  proxy_json       TEXT,                -- proxy summary: hits/recorded/misses
   correctness      REAL,                -- 0..1 from checks + judge
   checks_json      TEXT,                -- CheckResult[]
   judgment_json    TEXT,                -- Judgment
@@ -67,6 +70,9 @@ export type Db = DatabaseSync;
 const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   { table: "trials", column: "tokens_weighted", ddl: "ALTER TABLE trials ADD COLUMN tokens_weighted INTEGER" },
   { table: "trials", column: "error_recoveries", ddl: "ALTER TABLE trials ADD COLUMN error_recoveries INTEGER" },
+  { table: "trials", column: "network", ddl: "ALTER TABLE trials ADD COLUMN network TEXT" },
+  { table: "trials", column: "fixture_misses", ddl: "ALTER TABLE trials ADD COLUMN fixture_misses INTEGER" },
+  { table: "trials", column: "proxy_json", ddl: "ALTER TABLE trials ADD COLUMN proxy_json TEXT" },
   { table: "trials", column: "correctness", ddl: "ALTER TABLE trials ADD COLUMN correctness REAL" },
   { table: "trials", column: "checks_json", ddl: "ALTER TABLE trials ADD COLUMN checks_json TEXT" },
   { table: "trials", column: "judgment_json", ddl: "ALTER TABLE trials ADD COLUMN judgment_json TEXT" },
@@ -117,6 +123,9 @@ export interface TrialRow {
   tokens_total: number | null;
   tokens_weighted: number | null;
   tokens_json: string | null;
+  network: string | null;
+  fixture_misses: number | null;
+  proxy_json: string | null;
   correctness: number | null;
   checks_json: string | null;
   judgment_json: string | null;
@@ -157,11 +166,12 @@ export function finishTrial(db: Db, id: string, o: TrialOutcome): void {
   db.prepare(
     `UPDATE trials SET status = ?, finished_at = ?, result_text = ?, sdk_subtype = ?, num_turns = ?, tool_calls = ?,
        tool_errors = ?, error_recoveries = ?, escape_attempts = ?, duration_ms = ?, duration_api_ms = ?, tokens_total = ?, tokens_weighted = ?, tokens_json = ?,
-       cost_usd = ?, error = ?
+       cost_usd = ?, error = ?, network = ?, fixture_misses = ?, proxy_json = ?
      WHERE id = ?`,
   ).run(
     o.status, now(), o.result_text, o.sdk_subtype, o.num_turns, o.tool_calls, o.tool_errors, o.error_recoveries, o.escape_attempts,
-    o.duration_ms, o.duration_api_ms, o.tokens_total, o.tokens_weighted, o.tokens_json, o.cost_usd, o.error, id,
+    o.duration_ms, o.duration_api_ms, o.tokens_total, o.tokens_weighted, o.tokens_json, o.cost_usd, o.error,
+    o.network, o.fixture_misses, o.proxy_json, id,
   );
 }
 

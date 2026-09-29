@@ -11,4 +11,7 @@ export * from "./grading.ts";
 export * from "./scoring.ts";
 export * from "./rescore.ts";
 export * from "./transcript.ts";
+export * from "./certs.ts";
+export * from "./fixtures.ts";
+export * from "./proxy.ts";
 export * from "./paths.ts";

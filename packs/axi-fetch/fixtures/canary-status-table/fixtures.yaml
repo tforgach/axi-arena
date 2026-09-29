@@ -1,0 +1,3 @@
+# Synthetic page (no real site has this content), served only through replay.
+- url: https://example.com/arena/tidewright/status
+  body_file: status.html

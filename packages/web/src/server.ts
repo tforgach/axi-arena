@@ -37,8 +37,8 @@ function runConfig(run: RunRow): StoredRunConfig {
 }
 
 function trialSummary(t: TrialRow) {
-  const { tokens_json, checks_json, judgment_json, ...rest } = t;
-  return { ...rest, tokens: parse(tokens_json), checks: parse(checks_json), judgment: parse(judgment_json) };
+  const { tokens_json, checks_json, judgment_json, proxy_json, ...rest } = t;
+  return { ...rest, tokens: parse(tokens_json), checks: parse(checks_json), judgment: parse(judgment_json), proxy: parse(proxy_json) };
 }
 
 function progress(trials: TrialRow[]) {

@@ -225,17 +225,17 @@ Aggregate score per pack and model = mean over tasks. The overall pack score = m
 
 **Purpose:** both arms see byte-identical responses, and results stay comparable across weeks and AXI versions.
 
-- A local HTTP(S) **record/replay proxy** is started per run. It has its own local CA, and trial env gets `HTTPS_PROXY`/`HTTP_PROXY`, `NODE_EXTRA_CA_CERTS`, and `NODE_USE_ENV_PROXY=1` so that Node's `fetch` honors the proxy.
+- A local HTTP(S) **record/replay proxy** is started **per trial**, on a random port, so concurrent trials of different tasks never share fixtures or modes. *(M4: per trial, not per run.)* It has its own local CA, and trial env gets `HTTPS_PROXY`/`HTTP_PROXY`, `NODE_EXTRA_CA_CERTS`, and `NODE_USE_ENV_PROXY=1` so that Node's `fetch` honors the proxy.
 - **Infrastructure traffic always passes straight through** and is never recorded. That's a fixed allowlist: `api.anthropic.com` and the other Anthropic/Claude hosts. Telemetry is turned off in trials (`CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`) so it doesn't add noise. Every other host goes through record/replay rules. *(M0 saw datadog telemetry going through the proxy.)*
-- Certificates: a per-install local CA generates leaf certificates for each host as needed. Trials trust it through `NODE_EXTRA_CA_CERTS`.
+- Certificates: a per-install local CA (`~/.axi-arena/ca/`, generated with the `openssl` CLI) signs a certificate for each host as needed; these are cached. Trials trust it through `NODE_EXTRA_CA_CERTS`, and through `SSL_CERT_FILE`/`CURL_CA_BUNDLE`/`REQUESTS_CA_BUNDLE`, which point at the system roots plus our CA, for non-Node AXIs. Go binaries on macOS use the system keychain and won't trust it; those tasks need `live`.
 - Modes, set per task (the pack default can be overridden):
-  - `record`: forward to the internet and save the responses to `fixtures/<task-id>/`.
+  - `record`: serve existing fixtures, and forward anything missing to the internet and save the response to `fixtures/<task-id>/recorded/`. The upstream request is sent without `accept-encoding`, so bodies are stored decoded and replay is byte-identical.
   - `replay`: serve only from fixtures. An unmatched request returns 599 and gets logged, and the trial is flagged **fixture miss**.
   - `live`: pass everything through. Needed for AXIs that change state, and flagged as non-reproducible.
-- Fixture key: method + URL (+ body hash for non-GET). Stored as readable files: the body on its own, plus a metadata JSON.
-- **Synthetic fixtures:** a pack can hand-write pages in `fixtures/` (for canary facts, edge cases and error codes) with no recording needed.
+- Fixture key: method + canonical URL (+ body hash for non-GET). Stored as readable files: the body on its own, plus a metadata JSON. `set-cookie` and hop-by-hop headers are dropped.
+- **Synthetic fixtures:** `fixtures/<task-id>/fixtures.yaml` lists hand-written pages (`url`, `status`, `headers`, `body` or `body_file`) for canary facts, edge cases and error codes. They take precedence over recordings. Use a real domain such as `example.com`: WebFetch's domain safety check runs before the request, so an invented domain can fail before it ever reaches the proxy.
 - **Built-in tools:** *(M0: confirmed that Claude Code's `WebFetch` goes through `HTTPS_PROXY`, trusts `NODE_EXTRA_CA_CERTS`, and fetches locally with UA `Claude-User`. axi-fetch works too with `NODE_USE_ENV_PROXY=1`. Both arms returned a planted canary string from a replayed fixture.)* If some other baseline tool doesn't go through the proxy, that arm runs `live` and the report shows a "baseline not replayed" warning.
-- `axi-arena record <pack>` re-records fixtures on purpose. Fixtures are committed with the pack.
+- `axi-arena record <pack>` runs 1 trial per arm on one model in `record` mode, so the requests of both tools are captured. Fixtures are committed with the pack. Each trial stores its network mode, proxy hits, recordings and misses. Misses are flagged in the CLI and UI but not excluded from scoring.
 
 ## 8. Side effects and sandboxes
 - Hooks run in this order: pack-level `setup`/`teardown` once per run, then task-level `before`/`after` around every trial.
@@ -302,12 +302,12 @@ Charts use hand-written SVG with the dataviz reference palette, validated for li
 | **M1** ✅ | Runner + CLI + SQLite (done 2026-09-29) | `axi-arena run packs/axi-fetch` runs isolated trials for both arms and stores metrics. |
 | **M2** ✅ | Checks + judge + scoring (done 2026-09-29) | Correctness, Arena Score and CIs in the CLI summary; `rescore` works. |
 | **M3** ✅ | Web app (done 2026-09-29) | Runs, run overview, match detail, live transcripts. |
-| **M4** | Replay | Record/replay proxy, synthetic fixtures, fixture-miss detection. |
+| **M4** ✅ | Replay (done 2026-09-29) | Record/replay proxy, synthetic fixtures, fixture-miss detection. |
 | **M5** | Matrix + history + side effects | Multiple models per run, pack history view, `sequential`, before/after hooks. Validated on one private work AXI. |
 | v2 | Later | Adoption arm (both tools available), other providers, CI mode (fail on score regression). |
 
 ## 14. Open questions
-_None open right now._
+1. **Harmless shell commands under lockdown.** In 4 of about 20 AXI trials so far, Haiku ran `cd <skill dir> && …` or `npx axi-fetch` after loading the skill. Lockdown denies these, and the "not allowed in this arm" message tends to make the agent give up. In a normal session, `cd` would succeed and plain `axi-fetch` would be one step away. Options: (a) keep strict lockdown; (b) allow harmless builtins (`cd`, `pwd`, `echo`, `true`) in chained commands; (c) keep denying, but make the denial message name the allowed commands (e.g. "allowed here: axi-fetch"), much as a normal session's "command not found" points the agent somewhere.
 
 ### Decided
 - Tool parity: every arm gets the same tool definitions and only permissions differ (§4.3).

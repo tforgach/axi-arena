@@ -4,9 +4,9 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import {
-  ManifestSchema, PackError, baselineArms, computeScoreboard, executeRun, getRun, historicalTokens, listRuns, loadPack,
+  FixtureStore, ManifestSchema, PackError, baselineArms, fixtureDir, taskNetwork, computeScoreboard, executeRun, getRun, historicalTokens, listRuns, loadPack,
   median, openDb, planTrials, rescoreRun, runTrials,
-  type Db, type Effort, type Match, type Pack, type RunOptions, type ScoringConfig, type TrialRow,
+  type Db, type Effort, type Match, type Network, type Pack, type RunOptions, type ScoringConfig, type TrialRow,
 } from "@axi-arena/core";
 import { DEFAULT_PORT, serverRunning, startServer } from "@axi-arena/web";
 
@@ -14,6 +14,7 @@ const USAGE = `axi-arena — benchmark an AXI against its native counterpart
 
 Usage:
   axi-arena run <pack> [flags]       Run trials, grade them, print the Arena Score
+  axi-arena record <pack> [flags]    Record network fixtures: 1 trial per arm, fetches and saves what's missing
   axi-arena estimate <pack> [flags]  Show what a run would do, without running it
   axi-arena validate <pack>          Check a pack's manifest, tasks and scripts
   axi-arena list                     Recent runs
@@ -29,6 +30,7 @@ Run flags:
   --arms axi,x         Arms to run (default: all; must include axi and a baseline)
   --concurrency N      Parallel trials (default 4)
   --effort level       low|medium|high|xhigh|max (default: pack defaults.effort)
+  --network mode       replay|record|live for every task (default: per task / pack defaults.network)
   --keep               Keep trial working dirs for debugging
   --yes, -y            Skip the confirmation prompt
 
@@ -51,6 +53,7 @@ const { values: flags, positionals } = parseArgs({
     "no-judge": { type: "boolean", default: false },
     detail: { type: "boolean", default: false },
     port: { type: "string" },
+    network: { type: "string" },
     keep: { type: "boolean", default: false },
     yes: { type: "boolean", short: "y", default: false },
     help: { type: "boolean", short: "h", default: false },
@@ -102,7 +105,11 @@ function resolveOptions(pack: Pack): RunOptions {
   if (tags) tasks = tasks.filter((t) => t.tags.some((x) => tags.includes(x)));
   if (tasks.length === 0) die("no tasks match the filters", 2);
 
+  const NETWORKS = ["replay", "record", "live"];
+  if (flags.network && !NETWORKS.includes(flags.network)) die(`--network must be one of ${NETWORKS.join(", ")}`, 2);
+
   return {
+    network: flags.network as Network | undefined,
     models: list(flags.models) ?? pack.defaults.models,
     trials: positiveInt(flags.trials, pack.defaults.trials, "trials"),
     arms,
@@ -131,6 +138,14 @@ function printEstimate(pack: Pack, opts: RunOptions): void {
   console.log(`trials    ${planned.length}  (${opts.tasks.length} tasks × ${opts.arms.length} arms × ${opts.models.length} models × ${opts.trials})`);
   console.log(`effort    ${opts.effort}  ·  concurrency ${opts.concurrency}  ·  max turns ${opts.maxTurns}  ·  timeout ${opts.timeoutS}s`);
   console.log(`judge     ${opts.useJudge ? opts.judgeModel : "off (checks only)"}`);
+  const modes = new Map<string, string[]>();
+  for (const t of opts.tasks) {
+    const n = taskNetwork(pack, t, opts);
+    modes.set(n, [...(modes.get(n) ?? []), t.id]);
+  }
+  console.log(`network   ${[...modes].map(([n, ids]) => `${n} (${ids.length})`).join(", ")}`);
+  const bare = opts.tasks.filter((t) => taskNetwork(pack, t, opts) === "replay" && new FixtureStore(fixtureDir(pack, t.id)).count() === 0);
+  if (bare.length) console.log(`          ⚠ replay tasks with no fixtures (every request will miss): ${bare.map((t) => t.id).join(", ")} — run \`axi-arena record\` first`);
   if (known > 0) {
     console.log(`tokens    ~${fmt((tokens / known) * planned.length)} cost-weighted, excl. judge (from ${known}/${planned.length} trials with history)`);
   } else {
@@ -214,6 +229,10 @@ function printScoreboard(trials: TrialRow[], scoring: ScoringConfig): void {
   }
   printTable(rows, new Set([3, 4, 5, 6, 7, 8]));
   console.log("w-tokens/turns/time: AXI relative to baseline (− is better) · errors: median axi / base, incl. escapes");
+  const missed = trials.filter((t) => (t.fixture_misses ?? 0) > 0);
+  if (missed.length) {
+    console.log(`⚠ ${missed.length} trial(s) hit requests with no fixture (answered 599), so those comparisons aren't fully reproducible. Fill the gaps with: axi-arena record <pack> --tasks ${[...new Set(missed.map((t) => t.task_id))].join(",")}`);
+  }
 
   console.log("\nArena Score  (0 = parity with native, + = AXI better)");
   for (const a of [...board.byModel, ...(board.byModel.length > 1 && board.overall ? [board.overall] : [])]) {
@@ -230,9 +249,12 @@ function runScoring(db: Db, runId: string): ScoringConfig {
 
 async function cmdRun(): Promise<void> {
   const pack = requirePack();
-  const opts = resolveOptions(pack);
+  await runAndReport(pack, resolveOptions(pack), "Start run?");
+}
+
+async function runAndReport(pack: Pack, opts: RunOptions, question: string): Promise<void> {
   printEstimate(pack, opts);
-  if (!(await confirm("\nStart run?"))) die("aborted", 1);
+  if (!(await confirm(`\n${question}`))) die("aborted", 1);
 
   const db = openDb();
   const ac = new AbortController();
@@ -263,9 +285,10 @@ async function cmdRun(): Promise<void> {
       const status = o.status === "success" ? "" : `  [${o.status}${o.error ? `: ${o.error}` : ""}]`;
       const judgeErr = g?.judgment.source === "judge_error" ? `  [${g.judgment.reasoning}]` : "";
       const esc = o.escape_attempts ? `  ${o.escape_attempts} escape(s)` : "";
+      const miss = o.fixture_misses ? `  ⚠ ${o.fixture_misses} fixture miss(es)` : "";
       console.log(
         `[${String(done).padStart(String(total).length)}/${total}] ${mark} ${t.task.id} · ${t.arm} · ${t.model} #${t.index}` +
-          `  correct ${c == null ? "–" : pct(c)}  ${fmt(o.tokens_weighted)} w-tok  ${o.num_turns ?? "–"} turns  ${fmt((o.duration_ms ?? 0) / 1000, 1)}s${esc}${status}${judgeErr}`,
+          `  correct ${c == null ? "–" : pct(c)}  ${fmt(o.tokens_weighted)} w-tok  ${o.num_turns ?? "–"} turns  ${fmt((o.duration_ms ?? 0) / 1000, 1)}s${esc}${miss}${status}${judgeErr}`,
       );
     },
     onLog: (l) => console.log(l.split("\n").map((x) => `  │ ${x}`).join("\n")),
@@ -282,7 +305,20 @@ function cmdValidate(): void {
   const pack = requirePack();
   console.log(`✓ ${pack.name} ${pack.version}`);
   console.log(`  arms: axi vs ${baselineArms(pack).join(", ")}`);
-  console.log(`  tasks: ${pack.tasks.length} (${pack.tasks.map((t) => t.id).join(", ")})`);
+  console.log(`  tasks: ${pack.tasks.length}`);
+  for (const t of pack.tasks) {
+    const net = taskNetwork(pack, t, {});
+    let fixtures = "";
+    if (net !== "live") {
+      try {
+        const n = new FixtureStore(fixtureDir(pack, t.id)).count();
+        fixtures = n ? ` · ${n} fixture(s)` : net === "replay" ? " · ⚠ no fixtures — run `axi-arena record`" : " · no fixtures yet";
+      } catch (e) {
+        die(e instanceof Error ? e.message : String(e), 2);
+      }
+    }
+    console.log(`    ${t.id.padEnd(28)} ${net}${fixtures}`);
+  }
   const noChecks = pack.tasks.filter((t) => t.checks.length === 0 && !t.judge);
   if (noChecks.length) console.log(`  ⚠ tasks with no checks or judge: ${noChecks.map((t) => t.id).join(", ")}`);
 }
@@ -312,6 +348,19 @@ function cmdShow(): void {
   }
   if (trials.every((t) => t.correctness == null)) console.log(`this run has not been graded — try: axi-arena rescore ${target}\n`);
   printScoreboard(trials, runScoring(db, target!));
+}
+
+async function cmdRecord(): Promise<void> {
+  if (flags.network) die("record always uses --network record", 2);
+  if (flags.trials) die("record runs 1 trial per arm; drop --trials", 2);
+  flags.network = "record";
+  flags.trials = "1";
+  const pack = requirePack();
+  const opts = resolveOptions(pack);
+  // One model is enough to capture traffic; both arms run so each tool's requests are recorded.
+  opts.models = list(flags.models) ?? [pack.defaults.models[0]];
+  await runAndReport(pack, opts, "Record fixtures?");
+  console.log(`\nfixtures saved under ${pack.dir}/fixtures/<task-id>/recorded/ — commit them with the pack, then run with network: replay`);
 }
 
 async function cmdServe(): Promise<void> {
@@ -345,6 +394,7 @@ if (flags.help || !cmd) {
 
 switch (cmd) {
   case "run": await cmdRun(); break;
+  case "record": await cmdRecord(); break;
   case "estimate": { const p = requirePack(); printEstimate(p, resolveOptions(p)); break; }
   case "validate": cmdValidate(); break;
   case "list": cmdList(); break;

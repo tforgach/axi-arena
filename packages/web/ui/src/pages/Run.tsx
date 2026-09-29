@@ -30,7 +30,7 @@ function TrialsTable({ trials }: { trials: Trial[] }) {
                 <td><b>{t.arm}</b></td>
                 <td className="small">{t.model}</td>
                 <td className="num">{t.trial_index}</td>
-                <td><StatusPill status={t.status} /></td>
+                <td><StatusPill status={t.status} />{t.fixture_misses ? <span className="small" title="requests with no fixture" style={{ marginLeft: 6 }}>⚠ {t.fixture_misses} miss</span> : null}</td>
                 <td><Correct value={t.correctness} /></td>
                 <td className="num">{compact(t.tokens_weighted)}</td>
                 <td className="num">{t.num_turns ?? "–"}</td>
