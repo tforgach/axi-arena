@@ -68,6 +68,7 @@ export const ManifestSchema = z.object({
       timeout_s: z.number().positive().default(300),
       effort: Effort.default("medium"),
       network: Network.default("live"),
+      judge_model: z.string().default("claude-haiku-4-5"),
     })
     .prefault({}),
   scoring: z

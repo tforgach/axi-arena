@@ -191,7 +191,7 @@ after:  scripts/cleanup.sh
 | `turns` | `num_turns` |
 | `tool_calls` | Counted from the transcript |
 | `time_ms` | `duration_ms` (also `duration_api_ms`) |
-| `errors` | Tool results with errors + non-zero AXI exit codes + escape attempts + retries of the same command |
+| `errors` **(scored)** | Escape attempts + **error recoveries**: tool calls that errored and were followed by further tool calls. An error on the final call that *is* the answer (e.g. a clean 404 exit, which AXI principle 6 encourages) isn't penalized. Raw `tool_errors` is stored and shown too. *(Decided in M2.)* |
 | `status` | `success` / `max_turns` / `timeout` / `error` |
 | `cost_usd_notional` | `total_cost_usd`. Shown for reference, not scored. |
 
@@ -199,7 +199,8 @@ after:  scripts/cleanup.sh
 1. Deterministic checks run first.
 2. The LLM judge receives: task prompt, rubric, reference answer, **check results**, the final answer, and a condensed transcript (the list of tool calls with truncated outputs). It returns `{score: 0..1, reasoning}` as structured output.
 3. Any failed check marked `required: true` forces `correctness = 0` whatever the judge says. This is my addition, so a judge can't talk its way past a hard fact.
-4. The judge uses a **cheap model, pinned** (default `claude-haiku-4-5`, configurable with `--judge-model`), recorded on every judgment so scores stay comparable. The deterministic checks do most of the work, so a small judge is enough. Judge calls are logged and counted separately from trial tokens, and use the same runner backend as the trials.
+4. The judge grades **meaning, not wording**. The reference answer is one acceptable phrasing. *(M2: a rubric with a parenthetical phrase made Haiku demand that exact wording.)*
+5. The judge uses a **cheap model, pinned** (default `claude-haiku-4-5`, configurable with `--judge-model`), recorded on every judgment so scores stay comparable. The deterministic checks do most of the work, so a small judge is enough. Judge calls are logged and counted separately from trial tokens, and use the same runner backend as the trials.
 
 ### 6.3 Arena Score (per match, then aggregated)
 For each (task, model, baseline):
@@ -211,12 +212,12 @@ For each (task, model, baseline):
 4. **Correctness gate:**
    - If `axi_correctness < min_correctness`, or `axi_correctness < baseline_correctness − max_regression`, the match **fails the gate**. Its score is `min(0, efficiency) − (baseline_correctness − axi_correctness)`, and it's marked ✗.
    - Otherwise `score = efficiency`.
-5. Display `Arena Score = 100 × score`. **0 means parity with native**, +40 means 40% better on weighted efficiency with correctness intact, and negative means worse.
+5. Display `Arena Score = 100 × score`. **0 means parity with native**, +40 means 40% better on weighted efficiency with correctness intact, and negative means worse. Scores run from −200 to +100; below −100 only happens when a match fails the gate.
 
 Aggregate score per pack and model = mean over tasks. The overall pack score = mean over models. The report lets you slice by model, tag and baseline.
 
 ### 6.4 Statistics
-- Bootstrap 95% CI on every per-match delta and on the aggregates, resampling trials.
+- Bootstrap 95% CI on every per-match score and on the aggregates, resampling trials within each arm, with a seeded PRNG so the numbers are reproducible. Matches with fewer than 2 trials per arm show `n<2` instead of a CI.
 - Deltas whose CI crosses 0 are marked **"not significant"** in the UI and in the CLI summary.
 - Headline numbers are medians, with CIs shown beside them.
 
@@ -259,7 +260,7 @@ axi-arena validate <pack>                   # schema + check scripts + arm lockd
 axi-arena estimate <pack> [...run flags]    # trial count + token estimate, no execution
 axi-arena serve [--port 4477]               # start web app (run also auto-starts it)
 axi-arena list [runs|packs]
-axi-arena rescore <run-id> [--judge-model id]  # re-judge/re-score without re-running agents
+axi-arena rescore <run-id> [--judge-model id] [--no-judge]  # re-grade from stored transcripts using the pack's *current* task definitions; script checks reuse their original results
 ```
 
 `run` prints a URL to the live run view right away, and a summary table at the end.
@@ -291,7 +292,7 @@ Local only (`127.0.0.1`). It reads from SQLite and streams live updates over SSE
 |---|---|---|
 | **M0** ✅ | Spike: de-risk (done 2026-09-29, see `spike/`) | Confirmed: (a) SDK runs on the subscription login, or the `cli` fallback is wired up instead, (b) strict lockdown works (`tools` + `dontAsk` + hook), (c) injecting skills and hooks per trial with `settingSources: []`, (d) whether `WebFetch` traffic goes through a local proxy, (e) `modelUsage` captures WebFetch's side-model tokens, (f) how to pin effort in each backend. |
 | **M1** ✅ | Runner + CLI + SQLite (done 2026-09-29) | `axi-arena run packs/axi-fetch` runs isolated trials for both arms and stores metrics. |
-| **M2** | Checks + judge + scoring | Correctness, Arena Score and CIs in the CLI summary; `rescore` works. |
+| **M2** ✅ | Checks + judge + scoring (done 2026-09-29) | Correctness, Arena Score and CIs in the CLI summary; `rescore` works. |
 | **M3** | Web app | Runs, run overview, match detail, live transcripts. |
 | **M4** | Replay | Record/replay proxy, synthetic fixtures, fixture-miss detection. |
 | **M5** | Matrix + history + side effects | Multiple models per run, pack history view, `sequential`, before/after hooks. Validated on one private work AXI. |

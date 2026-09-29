@@ -5,7 +5,9 @@ import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { buildArmPlugin, buildQueryOptions, cleanupClaudeProjectDir, trialEnv, trialWorkDir, type GuardDenial } from "./arm.ts";
-import { appendEvent, finishRun, finishTrial, insertRun, insertTrial, startTrial, type Db, type TrialOutcome } from "./db.ts";
+import { scriptRunner } from "./checks.ts";
+import { appendEvent, finishRun, finishTrial, insertRun, insertTrial, setGrade, startTrial, type Db, type TrialOutcome } from "./db.ts";
+import { gradeTrial, type Grade } from "./grading.ts";
 import { computeMetrics } from "./metrics.ts";
 import { packPath, type Effort, type Pack, type Task } from "./pack.ts";
 import { runDir as makeRunDir } from "./paths.ts";
@@ -20,6 +22,8 @@ export interface RunOptions {
   maxTurns: number;
   timeoutS: number;
   keep: boolean;
+  judgeModel: string;
+  useJudge: boolean;
 }
 
 export interface PlannedTrial {
@@ -33,7 +37,7 @@ export interface PlannedTrial {
 export interface RunHooks {
   onRunStart?(runId: string, planned: PlannedTrial[]): void;
   onTrialStart?(t: PlannedTrial): void;
-  onTrialEnd?(t: PlannedTrial, outcome: TrialOutcome): void;
+  onTrialEnd?(t: PlannedTrial, outcome: TrialOutcome, grade: Grade | null): void;
   onLog?(line: string): void;
 }
 
@@ -108,7 +112,7 @@ export async function executeRun(db: Db, pack: Pack, opts: RunOptions, hooks: Ru
       pack_dir: pack.dir,
       pack_version: pack.version,
       axi_version: axiVersion,
-      config_json: JSON.stringify({ ...opts, tasks: opts.tasks.map((t) => t.id) }),
+      config_json: JSON.stringify({ ...opts, tasks: opts.tasks.map((t) => t.id), scoring: pack.scoring }),
     });
 
     const plugins = new Map(opts.arms.map((a) => [a, buildArmPlugin(pack, a, pack.arms[a], join(dir, "plugins"))]));
@@ -121,9 +125,10 @@ export async function executeRun(db: Db, pack: Pack, opts: RunOptions, hooks: Ru
       mkdirSync(trialDir, { recursive: true });
       startTrial(db, t.id, trialDir);
       hooks.onTrialStart?.(t);
-      const outcome = await runTrial(db, pack, t, trialDir, plugins.get(t.arm) ?? null, opts, arenaVars, log, signal);
+      const { outcome, grade } = await runTrial(db, pack, t, trialDir, plugins.get(t.arm) ?? null, opts, arenaVars, log, signal);
       finishTrial(db, t.id, outcome);
-      hooks.onTrialEnd?.(t, outcome);
+      if (grade) setGrade(db, t.id, grade.correctness, JSON.stringify(grade.checks), JSON.stringify(grade.judgment));
+      hooks.onTrialEnd?.(t, outcome, grade);
       if (!opts.keep) rmSync(trialDir, { recursive: true, force: true });
     };
 
@@ -160,9 +165,9 @@ async function runTrial(
   arenaVars: Record<string, string>,
   log: (l: string) => void,
   signal?: AbortSignal,
-): Promise<TrialOutcome> {
+): Promise<{ outcome: TrialOutcome; grade: Grade | null }> {
   const empty: TrialOutcome = {
-    status: "error", result_text: null, sdk_subtype: null, num_turns: null, tool_calls: null, tool_errors: null,
+    status: "error", result_text: null, sdk_subtype: null, num_turns: null, tool_calls: null, tool_errors: null, error_recoveries: null,
     escape_attempts: null, duration_ms: null, duration_api_ms: null, tokens_total: null, tokens_weighted: null, tokens_json: null,
     cost_usd: null, error: null,
   };
@@ -172,7 +177,7 @@ async function runTrial(
     try {
       runScript(pack, t.task.before, scriptEnv, log);
     } catch (e) {
-      return { ...empty, status: "setup_error", error: e instanceof Error ? e.message : String(e) };
+      return { outcome: { ...empty, status: "setup_error", error: e instanceof Error ? e.message : String(e) }, grade: null };
     }
   }
 
@@ -203,23 +208,30 @@ async function runTrial(
     cleanupClaudeProjectDir(trialWorkDir(trialDir));
   }
 
+  const m = computeMetrics(messages, denials);
+  // Grade before `after`, so script checks can inspect real-system state the trial left behind.
+  const grade = await gradeTrial(
+    t.task, messages, m, { trialDir, arm: t.arm, model: t.model },
+    { judgeModel: opts.judgeModel, useJudge: opts.useJudge }, scriptRunner(pack, t.task),
+  );
+
   if (t.task.after) {
     try { runScript(pack, t.task.after, scriptEnv, log); } catch (e) { log(`after failed for ${t.id}: ${e}`); }
   }
 
-  const m = computeMetrics(messages, denials);
   const status =
     timedOut ? "timeout"
     : m.sdkSubtype === "success" ? "success"
     : m.sdkSubtype === "error_max_turns" ? "max_turns"
     : "error";
-  return {
+  const outcome: TrialOutcome = {
     status,
     result_text: m.resultText,
     sdk_subtype: m.sdkSubtype,
     num_turns: m.numTurns,
     tool_calls: m.toolCalls,
     tool_errors: m.toolErrors,
+    error_recoveries: m.errorRecoveries,
     escape_attempts: m.escapeAttempts,
     duration_ms: m.durationMs,
     duration_api_ms: m.durationApiMs,
@@ -229,4 +241,5 @@ async function runTrial(
     cost_usd: m.costUsd,
     error: timedOut ? `timed out after ${opts.timeoutS}s` : error,
   };
+  return { outcome, grade };
 }

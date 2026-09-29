@@ -26,6 +26,7 @@ test("computes tool, error, escape and token metrics", () => {
   assert.equal(m.toolCalls, 3);
   assert.equal(m.escapeAttempts, 1, "hook + permission denial of the same call count once");
   assert.equal(m.toolErrors, 1, "the denied call is an escape, not a tool error");
+  assert.equal(m.errorRecoveries, 1, "t2 failed and the agent called another tool afterwards");
   assert.equal(m.tokensTotal, 370 + 1050, "sums every model, including side-model calls");
   assert.equal(m.tokensByModel["claude-haiku-4-5"].total, 1050);
   // weighted: sonnet 10*1 + 20*5 + 300*0.1 + 40*1.25 = 190; haiku 1000 + 50*5 = 1250
@@ -33,6 +34,23 @@ test("computes tool, error, escape and token metrics", () => {
   assert.equal(m.numTurns, 4);
   assert.equal(m.resultText, "Example Domain");
   assert.equal(m.sdkSubtype, "success");
+});
+
+test("an error on the final tool call is the answer, not a recovery", () => {
+  const m = computeMetrics(msgs.slice(2, 4), []); // only t2: axi-fetch exits 1, nothing after it
+  assert.equal(m.toolErrors, 1);
+  assert.equal(m.errorRecoveries, 0);
+});
+
+test("backstop denials are recovered from the stream's lockdown marker", () => {
+  const stream = [
+    { type: "assistant", message: { content: [{ type: "tool_use", id: "d", name: "Bash", input: {} }] } },
+    { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "d", is_error: true, content: "PreToolUse:Bash hook error: arena lockdown: `cat` is not allowed" }] } },
+  ] as unknown as SDKMessage[];
+  const m = computeMetrics(stream, []);
+  assert.equal(m.escapeAttempts, 1);
+  assert.equal(m.toolErrors, 0);
+  assert.ok(m.deniedIds.has("d"));
 });
 
 test("handles a stream with no result message", () => {

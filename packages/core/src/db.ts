@@ -34,12 +34,16 @@ CREATE TABLE IF NOT EXISTS trials (
   num_turns        INTEGER,
   tool_calls       INTEGER,
   tool_errors      INTEGER,
+  error_recoveries INTEGER,             -- scored: errors followed by further tool calls
   escape_attempts  INTEGER,
   duration_ms      INTEGER,
   duration_api_ms  INTEGER,
   tokens_total     INTEGER,
   tokens_weighted  INTEGER,             -- scored: cost-weighted input-token equivalents
   tokens_json      TEXT,                -- per-model usage breakdown
+  correctness      REAL,                -- 0..1 from checks + judge
+  checks_json      TEXT,                -- CheckResult[]
+  judgment_json    TEXT,                -- Judgment
   cost_usd         REAL,                -- notional; not scored
   trial_dir        TEXT,
   error            TEXT
@@ -62,6 +66,10 @@ export type Db = DatabaseSync;
 /** Additive migrations for DBs created by older versions. */
 const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   { table: "trials", column: "tokens_weighted", ddl: "ALTER TABLE trials ADD COLUMN tokens_weighted INTEGER" },
+  { table: "trials", column: "error_recoveries", ddl: "ALTER TABLE trials ADD COLUMN error_recoveries INTEGER" },
+  { table: "trials", column: "correctness", ddl: "ALTER TABLE trials ADD COLUMN correctness REAL" },
+  { table: "trials", column: "checks_json", ddl: "ALTER TABLE trials ADD COLUMN checks_json TEXT" },
+  { table: "trials", column: "judgment_json", ddl: "ALTER TABLE trials ADD COLUMN judgment_json TEXT" },
 ];
 
 export function openDb(path = join(arenaHome(), "arena.db")): Db {
@@ -102,12 +110,16 @@ export interface TrialRow {
   num_turns: number | null;
   tool_calls: number | null;
   tool_errors: number | null;
+  error_recoveries: number | null;
   escape_attempts: number | null;
   duration_ms: number | null;
   duration_api_ms: number | null;
   tokens_total: number | null;
   tokens_weighted: number | null;
   tokens_json: string | null;
+  correctness: number | null;
+  checks_json: string | null;
+  judgment_json: string | null;
   cost_usd: number | null;
   trial_dir: string | null;
   error: string | null;
@@ -136,18 +148,37 @@ export function startTrial(db: Db, id: string, trialDir: string): void {
   db.prepare(`UPDATE trials SET status = 'running', started_at = ?, trial_dir = ? WHERE id = ?`).run(now(), trialDir, id);
 }
 
-export type TrialOutcome = Omit<TrialRow, "id" | "run_id" | "task_id" | "arm" | "model" | "trial_index" | "started_at" | "finished_at" | "trial_dir">;
+export type TrialOutcome = Omit<
+  TrialRow,
+  "id" | "run_id" | "task_id" | "arm" | "model" | "trial_index" | "started_at" | "finished_at" | "trial_dir" | "correctness" | "checks_json" | "judgment_json"
+>;
 
 export function finishTrial(db: Db, id: string, o: TrialOutcome): void {
   db.prepare(
     `UPDATE trials SET status = ?, finished_at = ?, result_text = ?, sdk_subtype = ?, num_turns = ?, tool_calls = ?,
-       tool_errors = ?, escape_attempts = ?, duration_ms = ?, duration_api_ms = ?, tokens_total = ?, tokens_weighted = ?, tokens_json = ?,
+       tool_errors = ?, error_recoveries = ?, escape_attempts = ?, duration_ms = ?, duration_api_ms = ?, tokens_total = ?, tokens_weighted = ?, tokens_json = ?,
        cost_usd = ?, error = ?
      WHERE id = ?`,
   ).run(
-    o.status, now(), o.result_text, o.sdk_subtype, o.num_turns, o.tool_calls, o.tool_errors, o.escape_attempts,
+    o.status, now(), o.result_text, o.sdk_subtype, o.num_turns, o.tool_calls, o.tool_errors, o.error_recoveries, o.escape_attempts,
     o.duration_ms, o.duration_api_ms, o.tokens_total, o.tokens_weighted, o.tokens_json, o.cost_usd, o.error, id,
   );
+}
+
+export function setGrade(db: Db, trialId: string, correctness: number | null, checksJson: string, judgmentJson: string): void {
+  db.prepare(`UPDATE trials SET correctness = ?, checks_json = ?, judgment_json = ? WHERE id = ?`).run(
+    correctness, checksJson, judgmentJson, trialId,
+  );
+}
+
+export function trialEvents(db: Db, trialId: string): unknown[] {
+  return (db.prepare(`SELECT json FROM events WHERE trial_id = ? ORDER BY seq`).all(trialId) as { json: string }[]).map((r) =>
+    JSON.parse(r.json),
+  );
+}
+
+export function getRun(db: Db, runId: string): RunRow | undefined {
+  return db.prepare(`SELECT * FROM runs WHERE id = ?`).get(runId) as unknown as RunRow | undefined;
 }
 
 export function appendEvent(db: Db, trialId: string, seq: number, type: string, payload: unknown): void {

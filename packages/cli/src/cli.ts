@@ -1,19 +1,23 @@
 #!/usr/bin/env node
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import {
-  PackError, baselineArms, executeRun, historicalTokens, listRuns, loadPack, median, openDb, planTrials, runTrials,
-  type Effort, type Pack, type RunOptions, type TrialRow,
+  ManifestSchema, PackError, baselineArms, computeScoreboard, executeRun, getRun, historicalTokens, listRuns, loadPack,
+  median, openDb, planTrials, rescoreRun, runTrials,
+  type Db, type Effort, type Match, type Pack, type RunOptions, type ScoringConfig, type TrialRow,
 } from "@axi-arena/core";
 
 const USAGE = `axi-arena — benchmark an AXI against its native counterpart
 
 Usage:
-  axi-arena run <pack> [flags]       Run trials and store results
+  axi-arena run <pack> [flags]       Run trials, grade them, print the Arena Score
   axi-arena estimate <pack> [flags]  Show what a run would do, without running it
   axi-arena validate <pack>          Check a pack's manifest, tasks and scripts
   axi-arena list                     Recent runs
-  axi-arena show <run-id>            Summary table for a run
+  axi-arena show <run-id> [--detail] Scoreboard for a run (--detail adds per-arm metrics)
+  axi-arena rescore <run-id>         Re-grade a run from stored transcripts (no agent re-run)
 
 Run flags:
   --models a,b         Models to run (default: pack defaults.models)
@@ -25,6 +29,10 @@ Run flags:
   --effort level       low|medium|high|xhigh|max (default: pack defaults.effort)
   --keep               Keep trial working dirs for debugging
   --yes, -y            Skip the confirmation prompt
+
+Grading flags (run, rescore):
+  --judge-model id     Judge model (default: pack defaults.judge_model)
+  --no-judge           Deterministic checks only
 `;
 
 const { values: flags, positionals } = parseArgs({
@@ -37,6 +45,9 @@ const { values: flags, positionals } = parseArgs({
     arms: { type: "string" },
     concurrency: { type: "string" },
     effort: { type: "string" },
+    "judge-model": { type: "string" },
+    "no-judge": { type: "boolean", default: false },
+    detail: { type: "boolean", default: false },
     keep: { type: "boolean", default: false },
     yes: { type: "boolean", short: "y", default: false },
     help: { type: "boolean", short: "h", default: false },
@@ -47,21 +58,30 @@ const [cmd, target] = positionals;
 const list = (s?: string) => s?.split(",").map((x) => x.trim()).filter(Boolean);
 const globRe = (g: string) => new RegExp(`^${g.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*/g, ".*").replace(/\?/g, ".")}$`);
 const fmt = (n: number | null | undefined, digits = 0) =>
-  n == null ? "–" : n.toLocaleString("en-US", { maximumFractionDigits: digits, minimumFractionDigits: digits });
+  n == null || Number.isNaN(n) ? "–" : n.toLocaleString("en-US", { maximumFractionDigits: digits, minimumFractionDigits: digits });
+const signed = (x: number) => `${x >= 0 ? "+" : "−"}${fmt(Math.abs(x * 100), 1)}`;
+const pct = (x: number) => `${fmt(x * 100, 0)}%`;
 
 function die(msg: string, code = 1): never {
   process.stderr.write(`error: ${msg}\n`);
   process.exit(code);
 }
 
-function requirePack(): Pack {
-  if (!target) die("missing <pack> path", 2);
+function requirePack(path = target): Pack {
+  if (!path) die("missing <pack> path", 2);
   try {
-    return loadPack(target);
+    return loadPack(path);
   } catch (e) {
     if (e instanceof PackError) die(e.message, 2);
     throw e;
   }
+}
+
+function positiveInt(s: string | undefined, dflt: number, name: string): number {
+  if (s == null) return dflt;
+  const n = Number(s);
+  if (!Number.isInteger(n) || n < 1) die(`--${name} must be a positive integer`, 2);
+  return n;
 }
 
 function resolveOptions(pack: Pack): RunOptions {
@@ -79,23 +99,18 @@ function resolveOptions(pack: Pack): RunOptions {
   if (tags) tasks = tasks.filter((t) => t.tags.some((x) => tags.includes(x)));
   if (tasks.length === 0) die("no tasks match the filters", 2);
 
-  const int = (s: string | undefined, dflt: number, name: string) => {
-    if (s == null) return dflt;
-    const n = Number(s);
-    if (!Number.isInteger(n) || n < 1) die(`--${name} must be a positive integer`, 2);
-    return n;
-  };
-
   return {
     models: list(flags.models) ?? pack.defaults.models,
-    trials: int(flags.trials, pack.defaults.trials, "trials"),
+    trials: positiveInt(flags.trials, pack.defaults.trials, "trials"),
     arms,
     tasks,
-    concurrency: int(flags.concurrency, 4, "concurrency"),
+    concurrency: positiveInt(flags.concurrency, 4, "concurrency"),
     effort,
     maxTurns: pack.defaults.max_turns,
     timeoutS: pack.defaults.timeout_s,
     keep: flags.keep ?? false,
+    judgeModel: flags["judge-model"] ?? pack.defaults.judge_model,
+    useJudge: !flags["no-judge"],
   };
 }
 
@@ -112,9 +127,9 @@ function printEstimate(pack: Pack, opts: RunOptions): void {
   console.log(`tasks     ${opts.tasks.length}  ·  arms ${opts.arms.join(", ")}  ·  models ${opts.models.join(", ")}`);
   console.log(`trials    ${planned.length}  (${opts.tasks.length} tasks × ${opts.arms.length} arms × ${opts.models.length} models × ${opts.trials})`);
   console.log(`effort    ${opts.effort}  ·  concurrency ${opts.concurrency}  ·  max turns ${opts.maxTurns}  ·  timeout ${opts.timeoutS}s`);
+  console.log(`judge     ${opts.useJudge ? opts.judgeModel : "off (checks only)"}`);
   if (known > 0) {
-    const projected = (tokens / known) * planned.length;
-    console.log(`tokens    ~${fmt(projected)} cost-weighted (from ${known}/${planned.length} trials with history)`);
+    console.log(`tokens    ~${fmt((tokens / known) * planned.length)} cost-weighted, excl. judge (from ${known}/${planned.length} trials with history)`);
   } else {
     console.log(`tokens    unknown — no previous runs of this pack`);
   }
@@ -129,13 +144,22 @@ async function confirm(q: string): Promise<boolean> {
   return /^y(es)?$/i.test(a.trim());
 }
 
-function printSummary(trials: TrialRow[], armOrder: string[]): void {
+function printTable(rows: string[][], numericCols: Set<number>): void {
+  const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
+  for (const [i, r] of rows.entries()) {
+    console.log(r.map((c, j) => (numericCols.has(j) ? c.padStart(widths[j]) : c.padEnd(widths[j]))).join("  ").trimEnd());
+    if (i === 0) console.log(widths.map((w) => "─".repeat(w)).join("  "));
+  }
+}
+
+/** Per-arm metric medians — the raw material behind the scoreboard. */
+function printDetail(trials: TrialRow[], armOrder: string[]): void {
   const groups = new Map<string, TrialRow[]>();
   for (const t of trials) {
     const k = `${t.model}\u0000${t.task_id}\u0000${t.arm}`;
     groups.set(k, [...(groups.get(k) ?? []), t]);
   }
-  const rows: string[][] = [["model", "task", "arm", "ok", "w-tokens", "raw tokens", "turns", "time s", "tools", "errors", "escapes"]];
+  const rows: string[][] = [["model", "task", "arm", "n", "correct", "w-tokens", "raw tokens", "turns", "time s", "tools", "errors", "escapes"]];
   const keys = [...groups.keys()].sort((a, b) => {
     const [ma, ta, aa] = a.split("\u0000");
     const [mb, tb, ab] = b.split("\u0000");
@@ -144,27 +168,61 @@ function printSummary(trials: TrialRow[], armOrder: string[]): void {
   for (const k of keys) {
     const g = groups.get(k)!;
     const [model, task, arm] = k.split("\u0000");
-    const done = g.filter((t) => t.tokens_total != null);
-    const med = (f: (t: TrialRow) => number | null) => median(done.map(f).filter((x): x is number => x != null));
+    const med = (f: (t: TrialRow) => number | null) => median(g.map(f).filter((x): x is number => x != null));
+    const graded = g.filter((t) => t.correctness != null);
     rows.push([
-      model, task, arm,
-      `${g.filter((t) => t.status === "success").length}/${g.length}`,
+      model, task, arm, String(g.length),
+      graded.length ? pct(graded.reduce((s, t) => s + t.correctness!, 0) / graded.length) : "–",
       fmt(med((t) => t.tokens_weighted)),
       fmt(med((t) => t.tokens_total)),
       fmt(med((t) => t.num_turns), 1),
-      fmt((med((t) => t.duration_ms) ?? NaN) / 1000, 1).replace("NaN", "–"),
+      fmt((med((t) => t.duration_ms) ?? NaN) / 1000, 1),
       fmt(med((t) => t.tool_calls), 1),
       fmt(med((t) => t.tool_errors), 1),
       fmt(med((t) => t.escape_attempts), 1),
     ]);
   }
-  const widths = rows[0].map((_, i) => Math.max(...rows.map((r) => r[i].length)));
-  const numeric = new Set([3, 4, 5, 6, 7, 8, 9, 10]);
-  for (const [i, r] of rows.entries()) {
-    console.log(r.map((c, j) => (numeric.has(j) ? c.padStart(widths[j]) : c.padEnd(widths[j]))).join("  "));
-    if (i === 0) console.log(widths.map((w) => "─".repeat(w)).join("  "));
+  printTable(rows, new Set([3, 4, 5, 6, 7, 8, 9, 10, 11]));
+  console.log("medians per arm · correct = mean correctness · w-tokens = cost-weighted (scored)");
+}
+
+function printScoreboard(trials: TrialRow[], scoring: ScoringConfig): void {
+  const board = computeScoreboard(trials, scoring);
+  if (board.matches.length === 0) return console.log("no gradable matches yet");
+
+  const ciStr = (ci: [number, number] | null) => (ci ? `[${signed(ci[0])}, ${signed(ci[1])}]` : "–");
+  const verdict = (m: { significant: boolean; ci: [number, number] | null }, gate = true) =>
+    !gate ? "✗ gate" : m.ci == null ? "n<2" : m.significant ? "" : "n.s.";
+  const delta = (axi: number, base: number) => (base > 0 ? `${axi <= base ? "−" : "+"}${fmt(Math.abs(1 - axi / base) * 100, 0)}%` : "–");
+
+  const rows: string[][] = [["model", "task", "vs", "correct axi/base", "w-tokens", "turns", "time", "errors", "score", "95% CI", ""]];
+  for (const m of board.matches as Match[]) {
+    rows.push([
+      m.model, m.task, m.baseline,
+      `${pct(m.axi.correctness)} / ${pct(m.base.correctness)}`,
+      delta(m.axi.tokens, m.base.tokens),
+      delta(m.axi.turns, m.base.turns),
+      delta(m.axi.time, m.base.time),
+      `${fmt(m.axi.errors, 1)} / ${fmt(m.base.errors, 1)}`,
+      signed(m.score),
+      ciStr(m.ci),
+      verdict(m, m.gatePassed),
+    ]);
   }
-  console.log("\nmedians per group · w-tokens = cost-weighted (scored), raw = plain sum · correctness and Arena Score arrive in M2");
+  printTable(rows, new Set([3, 4, 5, 6, 7, 8]));
+  console.log("w-tokens/turns/time: AXI relative to baseline (− is better) · errors: median axi / base, incl. escapes");
+
+  console.log("\nArena Score  (0 = parity with native, + = AXI better)");
+  for (const a of [...board.byModel, ...(board.byModel.length > 1 && board.overall ? [board.overall] : [])]) {
+    const gates = a.gateFailures ? `  ${a.gateFailures}/${a.matches} failed the correctness gate` : "";
+    console.log(`  ${a.key.padEnd(24)} ${signed(a.score).padStart(7)}  ${ciStr(a.ci)}  ${verdict(a)}${gates}`);
+  }
+}
+
+function runScoring(db: Db, runId: string): ScoringConfig {
+  const run = getRun(db, runId);
+  const stored = run ? (JSON.parse(run.config_json) as { scoring?: ScoringConfig }).scoring : undefined;
+  return stored ?? ManifestSchema.shape.scoring.parse({});
 }
 
 async function cmdRun(): Promise<void> {
@@ -188,22 +246,26 @@ async function cmdRun(): Promise<void> {
       total = planned.length;
       console.log(`\nrun ${id}\n`);
     },
-    onTrialEnd: (t, o) => {
+    onTrialEnd: (t, o, g) => {
       done++;
-      const mark = o.status === "success" ? "✓" : "✗";
-      const extra = o.status === "success" ? "" : `  [${o.status}${o.error ? `: ${o.error}` : ""}]`;
+      const c = g?.correctness;
+      const mark = c == null ? "?" : c >= 0.5 ? "✓" : "✗";
+      const status = o.status === "success" ? "" : `  [${o.status}${o.error ? `: ${o.error}` : ""}]`;
+      const judgeErr = g?.judgment.source === "judge_error" ? `  [${g.judgment.reasoning}]` : "";
       const esc = o.escape_attempts ? `  ${o.escape_attempts} escape(s)` : "";
       console.log(
         `[${String(done).padStart(String(total).length)}/${total}] ${mark} ${t.task.id} · ${t.arm} · ${t.model} #${t.index}` +
-          `  ${fmt(o.tokens_weighted)} w-tok  ${o.num_turns ?? "–"} turns  ${fmt((o.duration_ms ?? 0) / 1000, 1)}s${esc}${extra}`,
+          `  correct ${c == null ? "–" : pct(c)}  ${fmt(o.tokens_weighted)} w-tok  ${o.num_turns ?? "–"} turns  ${fmt((o.duration_ms ?? 0) / 1000, 1)}s${esc}${status}${judgeErr}`,
       );
     },
     onLog: (l) => console.log(l.split("\n").map((x) => `  │ ${x}`).join("\n")),
   }, ac.signal);
 
+  const trials = runTrials(db, runId);
   console.log("");
-  printSummary(runTrials(db, runId), opts.arms);
-  console.log(`\nrun id: ${runId}`);
+  if (flags.detail) { printDetail(trials, opts.arms); console.log(""); }
+  printScoreboard(trials, pack.scoring);
+  console.log(`\nrun id: ${runId}  ·  details: axi-arena show ${runId} --detail`);
 }
 
 function cmdValidate(): void {
@@ -223,13 +285,40 @@ function cmdList(): void {
   }
 }
 
-function cmdShow(): void {
+function runTrialsOrDie(db: Db): TrialRow[] {
   if (!target) die("missing <run-id>", 2);
-  const db = openDb();
   const trials = runTrials(db, target);
   if (trials.length === 0) die(`no trials for run ${target}`, 1);
-  const arms = [...new Set(trials.map((t) => t.arm))].sort((a, b) => (a === "axi" ? -1 : b === "axi" ? 1 : a.localeCompare(b)));
-  printSummary(trials, arms);
+  return trials;
+}
+
+function cmdShow(): void {
+  const db = openDb();
+  const trials = runTrialsOrDie(db);
+  if (flags.detail) {
+    const arms = [...new Set(trials.map((t) => t.arm))].sort((a, b) => (a === "axi" ? -1 : b === "axi" ? 1 : a.localeCompare(b)));
+    printDetail(trials, arms);
+    console.log("");
+  }
+  if (trials.every((t) => t.correctness == null)) console.log(`this run has not been graded — try: axi-arena rescore ${target}\n`);
+  printScoreboard(trials, runScoring(db, target!));
+}
+
+async function cmdRescore(): Promise<void> {
+  const db = openDb();
+  runTrialsOrDie(db);
+  const run = getRun(db, target!)!;
+  if (!existsSync(join(run.pack_dir, "arena.yaml"))) die(`pack for this run is gone: ${run.pack_dir}`, 1);
+  const pack = requirePack(run.pack_dir);
+  const judgeModel = flags["judge-model"] ?? pack.defaults.judge_model;
+  const useJudge = !flags["no-judge"];
+  console.log(`rescoring ${target} with ${useJudge ? `judge ${judgeModel}` : "checks only"}\n`);
+  const n = await rescoreRun(db, pack, target!, { judgeModel, useJudge }, (row, g) => {
+    const c = g.correctness;
+    console.log(`${c == null ? "?" : c >= 0.5 ? "✓" : "✗"} ${row.task_id} · ${row.arm} · ${row.model} #${row.trial_index}  correct ${c == null ? "–" : pct(c)}  (${g.judgment.source})`);
+  }, positiveInt(flags.concurrency, 4, "concurrency"));
+  console.log(`\nregraded ${n} trial(s)\n`);
+  printScoreboard(runTrials(db, target!), runScoring(db, target!));
 }
 
 if (flags.help || !cmd) {
@@ -239,9 +328,10 @@ if (flags.help || !cmd) {
 
 switch (cmd) {
   case "run": await cmdRun(); break;
-  case "estimate": printEstimate(requirePack(), resolveOptions(requirePack())); break;
+  case "estimate": { const p = requirePack(); printEstimate(p, resolveOptions(p)); break; }
   case "validate": cmdValidate(); break;
   case "list": cmdList(); break;
   case "show": cmdShow(); break;
+  case "rescore": await cmdRescore(); break;
   default: die(`unknown command "${cmd}"\n\n${USAGE}`, 2);
 }

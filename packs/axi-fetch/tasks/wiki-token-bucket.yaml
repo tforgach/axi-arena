@@ -1,14 +1,19 @@
 id: wiki-token-bucket
 prompt: >
   According to https://en.wikipedia.org/wiki/Token_bucket, which other algorithm is
-  the token bucket compared to, and when used as a meter, what does the article say
-  the two are equivalent to? Answer in two short sentences.
+  the token bucket compared to, and how does the article describe the relationship
+  between the two when that other algorithm is used as a meter? Answer in two short
+  sentences.
 tags: [article, single-fetch]
 checks:
   - { type: contains, value: leaky bucket, required: true }
   - { type: tool_called, min: 1 }
 judge:
   rubric: >
-    Correct if it names the leaky bucket algorithm and says the two are equivalent
-    (mirror images) when the leaky bucket is used as a meter.
-  reference: The leaky bucket; as a meter the leaky bucket is equivalent to (a mirror image of) the token bucket.
+    Correct if it names the leaky bucket algorithm and conveys that, used as a meter,
+    the leaky bucket is equivalent to the token bucket (the same algorithm seen from
+    the other side / they classify the same packets as conforming). Any wording that
+    conveys equivalence is fully correct.
+  reference: >
+    The leaky bucket. Used as a meter, it is equivalent to the token bucket — a mirror
+    image of it — and identifies the same packets as conforming or nonconforming.
