@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.svg" width="112" height="112" alt="axi-arena logo: an abstract purple Colosseum">
+  <img src="docs/logo.png" width="160" height="160" alt="axi-arena logo: a purple Colosseum">
 </p>
 
 <h1 align="center">axi-arena</h1>
