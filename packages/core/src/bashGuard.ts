@@ -1,8 +1,15 @@
 // Backstop for arm lockdown: decides whether a Bash command is made up solely of
-// allowed programs. The SDK's own permission rules are the first line of defense;
-// this guard catches anything they let through and logs it as an escape attempt.
+// allowed programs (plus harmless helpers). It is the single source of truth for Bash:
+// the lockdown hook allows what it approves and denies + logs the rest as escape attempts.
 
 export type GuardVerdict = { ok: true } | { ok: false; reason: string };
+
+/**
+ * Commands that can't stand in for any AXI, allowed inside chained commands in every arm
+ * (e.g. `cd <dir> && axi-fetch …`). Kept minimal on purpose: for some AXIs `ls`, `cat` or `grep`
+ * *are* the equivalent, so packs extend this list explicitly rather than by default.
+ */
+export const DEFAULT_HARMLESS_COMMANDS = ["cd", "pwd", "echo", "printf", "true", "false", "which", "type"];
 
 /** Extract allowed command prefixes from rules like `Bash(axi-fetch:*)` or `Bash(gh pr *)`. */
 export function bashPrefixes(rules: string[]): string[] {
@@ -56,16 +63,29 @@ function matchesPrefix(segment: string, prefix: string): boolean {
   return segment === prefix || segment.startsWith(prefix + " ") || segment.startsWith(prefix + "\t");
 }
 
-export function checkBash(command: string, allowPrefixes: string[], denyPrefixes: string[] = []): GuardVerdict {
+/** `/any/path/axi-fetch args` is still the allowed program; compare it by basename. */
+function withoutProgramPath(segment: string): string {
+  const [first, ...rest] = segment.split(/(\s+)/);
+  if (!first.includes("/")) return segment;
+  return [first.slice(first.lastIndexOf("/") + 1), ...rest].join("");
+}
+
+export function checkBash(
+  command: string,
+  allowPrefixes: string[],
+  denyPrefixes: string[] = [],
+  harmless: string[] = DEFAULT_HARMLESS_COMMANDS,
+): GuardVerdict {
   const segs = splitSegments(command);
   if (!segs) return { ok: false, reason: "uses substitution, subshells or heredocs" };
   if (segs.length === 0) return { ok: false, reason: "empty command" };
-  for (const s of segs) {
+  for (const raw of segs) {
+    const s = withoutProgramPath(raw);
     const denied = denyPrefixes.find((p) => matchesPrefix(s, p));
     if (denied) return { ok: false, reason: `\`${denied}\` is denied in this arm` };
-    if (!allowPrefixes.some((p) => matchesPrefix(s, p))) {
-      return { ok: false, reason: `\`${s.split(/\s+/)[0]}\` is not allowed in this arm` };
-    }
+    if (allowPrefixes.some((p) => matchesPrefix(s, p))) continue;
+    if (harmless.some((h) => matchesPrefix(raw, h))) continue;
+    return { ok: false, reason: `\`${raw.split(/\s+/)[0]}\` is not allowed in this arm` };
   }
   return { ok: true };
 }

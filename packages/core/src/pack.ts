@@ -2,6 +2,7 @@ import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join, resolve, isAbsolute } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
+import { DEFAULT_HARMLESS_COMMANDS } from "./bashGuard.ts";
 
 const HookEvent = z.enum(["SessionStart", "PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit"]);
 
@@ -61,6 +62,8 @@ export const ManifestSchema = z.object({
   setup: z.string().optional(),
   teardown: z.string().optional(),
   sequential: z.boolean().default(false),
+  /** Commands allowed inside chained Bash commands in every arm (never counted as escapes). */
+  harmless_commands: z.array(z.string()).default(DEFAULT_HARMLESS_COMMANDS),
   defaults: z
     .object({
       trials: z.number().int().positive().default(3),

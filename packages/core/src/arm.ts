@@ -107,7 +107,7 @@ const underDir = (p: string, dir: string) => p === dir || p.startsWith(dir + "/"
  * PreToolUse backstop: denies anything outside the arm's own permissions and records it
  * as an escape. `readRoots` are the only places the common Read tool may look.
  */
-export function lockdownHook(arm: Arm, denials: GuardDenial[], readRoots: string[] = []): HookCallback {
+export function lockdownHook(arm: Arm, denials: GuardDenial[], readRoots: string[] = [], harmless?: string[]): HookCallback {
   const allow = bashPrefixes(arm.allow);
   const deny = bashPrefixes(arm.deny);
   const mcpPrefixes = Object.keys(arm.mcp_servers).map((s) => `mcp__${s}__`);
@@ -120,8 +120,11 @@ export function lockdownHook(arm: Arm, denials: GuardDenial[], readRoots: string
     let reason: string | null = null;
     if (tool === "Bash" && permitted.has("Bash")) {
       const cmd = String((toolInput as { command?: unknown })?.command ?? "");
-      const v = checkBash(cmd, allow, deny);
+      const v = checkBash(cmd, allow, deny, harmless);
       if (!v.ok) reason = v.reason;
+      // The guard is the single source of truth for Bash: approve explicitly, so Claude Code's
+      // static rules don't deny e.g. `cd <dir> && axi-fetch …` or a path-qualified AXI call.
+      else return { hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow" } };
     } else if (tool === "Read" && !permitted.has("Read")) {
       const file = resolve(String((toolInput as { file_path?: unknown })?.file_path ?? ""));
       if (!readRoots.some((r) => underDir(file, r))) reason = "Read is limited to this trial's saved tool outputs";
@@ -202,6 +205,6 @@ export function buildQueryOptions(i: QueryOptionsInput): Options {
     allowedTools,
     disallowedTools: arm.deny,
     permissionMode: "dontAsk",
-    hooks: { PreToolUse: [{ hooks: [lockdownHook(arm, i.denials, readRoots)] }] },
+    hooks: { PreToolUse: [{ hooks: [lockdownHook(arm, i.denials, readRoots, i.pack.harmless_commands)] }] },
   };
 }

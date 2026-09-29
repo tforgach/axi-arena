@@ -51,6 +51,8 @@ test("axi arm: WebFetch and foreign MCP tools are escapes; its Bash rules and Sk
   const p = pack();
   const hook = lockdownHook(p.arms.axi, [], ["/trial/out"]);
   assert.equal(await decide(hook, call("Bash", { command: "axi-fetch https://a" })), "allow");
+  assert.equal(await decide(hook, call("Bash", { command: "cd /skills/axi-fetch && axi-fetch https://a" })), "allow");
+  assert.equal(await decide(hook, call("Bash", { command: "cd /tmp && curl https://a" })), "deny");
   assert.equal(await decide(hook, call("Skill", { skill: "s" })), "allow");
   assert.equal(await decide(hook, call("WebFetch", { url: "https://a" })), "deny");
   assert.equal(await decide(hook, call("mcp__gh__search", {})), "deny");

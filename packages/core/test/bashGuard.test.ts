@@ -38,6 +38,23 @@ test("denies substitution, subshells and heredocs outright", () => {
   assert.ok(!ok("axi-fetch 'unterminated"));
 });
 
+test("harmless commands may accompany the AXI; equivalents still escape", () => {
+  assert.ok(ok("cd /some/skill/dir && axi-fetch https://a.com"));
+  assert.ok(ok("which axi-fetch"));
+  assert.ok(ok("echo start; axi-fetch https://a.com"));
+  assert.ok(!ok("cd /tmp && curl https://a.com"), "cd doesn't launder an equivalent");
+  assert.ok(!ok("ls /tmp"), "ls isn't harmless by default: for some AXIs it is the equivalent");
+  assert.ok(!checkBash("cd /x", allow, deny, []).ok, "packs can remove the harmless list");
+});
+
+test("calling the allowed program by path is still the AXI", () => {
+  assert.ok(ok("/Users/me/.bin/axi-fetch https://a.com"));
+  assert.ok(ok("./axi-fetch https://a.com"));
+  assert.ok(!ok("/usr/bin/curl https://a.com"));
+  assert.ok(!ok("/opt/axi-fetch/bin/curl https://a.com"), "basename is what counts, not a directory name");
+  assert.ok(!ok("/x/axi-fetch update"), "deny rules apply to path-qualified calls too");
+});
+
 test("explicit deny rules win over allow", () => {
   assert.ok(!ok("axi-fetch update"));
   assert.ok(!ok("axi-fetch update --check"));

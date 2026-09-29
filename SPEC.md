@@ -79,7 +79,10 @@ Note: `allowedTools` in the SDK only *auto-approves* tools. It does **not** rest
 1. **Same tool definitions in every arm.** `tools` is the union of every arm's tools (plus their MCP servers), plus `Skill` if any arm ships skills, plus the common tools. No arm gets a cheaper context just because it carries fewer tool descriptions. *(Decided after M1: Bash's large description gave the AXI arm about 11.3k tokens of starting context against about 7.6k for WebFetch.)*
 2. **Only permissions differ.** `allowedTools` holds just this arm's rules (e.g. `Bash(axi-fetch:*)`), with `permissionMode: 'dontAsk'`, so anything that doesn't match is denied instead of prompting. Calling a tool that's defined but not permitted counts as an escape.
    - **Common tool `Read`** is in every arm, limited to the trial's own saved-output folder. *(Decided after M1: Claude Code saves large tool outputs to a file, and without `Read` the agent can't open it.)*
-3. A backstop `PreToolUse` hook that denies and logs anything outside the arm's allowlist. It must **parse compound commands** (`;`, `&&`, `|`, `$(…)`) and require every segment to be allowed. A plain prefix check would let `axi-fetch x; curl y` through.
+3. **The lockdown hook is the single source of truth for Bash.** It parses chained commands (`;`, `&&`, `|`; any `$(…)`, subshell or heredoc is refused) and requires every segment to be either an allowed program or a **harmless command**. It then explicitly allows the call, so Claude Code's static rules can't deny e.g. `cd <dir> && axi-fetch …`. Anything else is denied and logged as an escape.
+   - **What counts as an escape:** reaching for an *equivalent* of the AXI (curl, WebFetch, python, …). Stumbling while trying to use the AXI itself doesn't count. *(Decided after M4.)*
+   - **Harmless commands** (`harmless_commands`, default `cd pwd echo printf true false which type`) are allowed in every arm. The list is minimal on purpose: for some AXIs `ls`, `cat` or `grep` *are* the equivalent. A pack can extend it, or empty it.
+   - **Calling the AXI by path** (`/…/.bin/axi-fetch url`, `./axi-fetch`) is matched by program name, so it's the AXI, not an escape. If the path doesn't exist, that's an ordinary tool error.
 4. The AXI arm also gets the `Skill` tool, so the agent can read the AXI's skill. That call is part of the AXI's real cost and counts toward its turns and tokens.
 
 *(M0: confirmed. When told to use `curl`, the agent was denied, which was recorded in `permission_denials` and in the hook log, and it then switched to `axi-fetch`.)*
@@ -307,9 +310,10 @@ Charts use hand-written SVG with the dataviz reference palette, validated for li
 | v2 | Later | Adoption arm (both tools available), other providers, CI mode (fail on score regression). |
 
 ## 14. Open questions
-1. **Harmless shell commands under lockdown.** In 4 of about 20 AXI trials so far, Haiku ran `cd <skill dir> && …` or `npx axi-fetch` after loading the skill. Lockdown denies these, and the "not allowed in this arm" message tends to make the agent give up. In a normal session, `cd` would succeed and plain `axi-fetch` would be one step away. Options: (a) keep strict lockdown; (b) allow harmless builtins (`cd`, `pwd`, `echo`, `true`) in chained commands; (c) keep denying, but make the denial message name the allowed commands (e.g. "allowed here: axi-fetch"), much as a normal session's "command not found" points the agent somewhere.
+_None open right now._
 
 ### Decided
+- Escapes mean reaching for an equivalent tool; harmless commands and path-qualified AXI calls are allowed (§4.3). *(Chosen after M4: 4 of ~20 AXI trials had run `cd <skill dir> && …` or `./axi-fetch` and were denied, then gave up.)*
 - Tool parity: every arm gets the same tool definitions and only permissions differ (§4.3).
 - `Read` is a common tool in every arm, limited to the trial's saved outputs (§4.3).
 - Token metric: cost-weighted tokens are scored, and the plain sum is shown next to them (§6.1).
