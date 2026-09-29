@@ -217,3 +217,8 @@ Node runs the TypeScript directly; only the UI has a build step.
 
 Milestones M0–M4 are done: runner, scoring, web app and replay. Next up (M5): model-matrix runs and
 validation against stateful AXIs. See [SPEC.md](SPEC.md) for the full design and decision log.
+
+## License
+
+[MIT](LICENSE). Recorded fixtures in `packs/axi-fetch/fixtures/` are copies of third-party pages under
+their own terms; see [the fixtures README](packs/axi-fetch/fixtures/README.md).
