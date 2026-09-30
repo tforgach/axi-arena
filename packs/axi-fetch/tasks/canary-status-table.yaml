@@ -1,6 +1,6 @@
 id: canary-status-table
 prompt: >
-  Using https://example.com/arena/tidewright/status, list every region whose status is
+  Using https://tidewright.github.io/status, list every region whose status is
   "Degraded", with the note for each.
 tags: [canary, table]
 network: replay            # synthetic page; only exists in fixtures

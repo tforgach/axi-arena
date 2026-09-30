@@ -9,11 +9,14 @@ checks:
   - { type: contains, value: leaky bucket, required: true }
   - { type: tool_called, min: 1 }
 judge:
+  # Binary and explicit: a cheap judge applies this literally, so say what is NOT required.
   rubric: >
-    Correct if it names the leaky bucket algorithm and conveys that, used as a meter,
-    the leaky bucket is equivalent to the token bucket (the same algorithm seen from
-    the other side / they classify the same packets as conforming). Any wording that
-    conveys equivalence is fully correct.
+    Score 1.0 if the answer (a) names the leaky bucket algorithm and (b) says that, when
+    the leaky bucket is used as a meter, the two are equivalent — any wording that conveys
+    equivalence counts, e.g. "equivalent", "the same", "mirror image(s)", "identical in
+    behavior". Do NOT deduct for omitting how packets are classified, for extra correct
+    detail, or for phrasing. Score 0.5 if it names the leaky bucket but does not convey
+    equivalence as a meter. Score 0 if it doesn't name the leaky bucket or states they differ.
   reference: >
-    The leaky bucket. Used as a meter, it is equivalent to the token bucket — a mirror
-    image of it — and identifies the same packets as conforming or nonconforming.
+    The leaky bucket. Used as a meter, it is equivalent to the token bucket (a mirror
+    image of it).

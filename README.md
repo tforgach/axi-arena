@@ -135,7 +135,7 @@ arms:
 # tasks/canary-release-notes.yaml
 id: canary-release-notes
 prompt: >
-  According to the release notes at https://example.com/arena/tidewright/release-notes,
+  According to the release notes at https://tidewright.github.io/release-notes,
   in which Tidewright version was the --strict-tides flag added, and what is its default?
 network: replay
 checks:

@@ -1,3 +1,4 @@
-# Synthetic page (no real site has this content), served only through replay.
-- url: https://example.com/arena/tidewright/release-notes
+# Synthetic page, served only through replay. A realistic project-site URL: with
+# example.com, models sometimes refused ("a placeholder domain") without calling a tool.
+- url: https://tidewright.github.io/release-notes
   body_file: release-notes.html
