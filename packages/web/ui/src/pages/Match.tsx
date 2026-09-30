@@ -109,7 +109,7 @@ export function MatchPage({ runId, task, model, vs }: { runId: string; task: str
 
       <h2>Side by side</h2>
       <div className="card" style={{ padding: 0 }}>
-        <SummaryTable axi={m.axi} base={m.base} baseline={vs} metric={data.run.config.scoring.token_metric ?? "session"} />
+        <SummaryTable axi={m.axi} base={m.base} baseline={vs} metric={data.run.config.scoring.token_metric ?? "tool"} />
       </div>
 
       <h2>Where the tokens go</h2>

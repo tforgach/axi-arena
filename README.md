@@ -45,8 +45,10 @@ results as evidence. A failed `required` check scores 0 regardless of the judge.
 Matches roll up into the **Arena Score**:
 
 - **0 = parity with native**, **+40** = 40% better on weighted efficiency, **negative** = worse.
-- Efficiency is the relative improvement in cost-weighted tokens (40%), turns (20%), time (20%) and
-  errors + escapes (20%). Weights can be set per pack.
+- Efficiency is the relative improvement in tool tokens (40%), turns (20%), time (20%) and
+  errors + escapes (20%). Tool tokens are what the tool calls put into the context, plus any side
+  model a tool runs. Weights and the token metric can be set per pack.
+- Being more correct than the baseline adds to the score.
 - A **correctness gate** comes first: an AXI that is cheaper but less correct fails the match.
 - Every score comes with a **bootstrap 95% confidence interval**; differences that could be noise are marked `n.s.`
 
@@ -115,7 +117,7 @@ my-axi-pack/
 ```yaml
 # arena.yaml
 name: axi-fetch
-version: 0.1.0
+version: 0.2.0
 axi_version_cmd: axi-fetch --version
 setup: scripts/setup.sh          # e.g. install a pinned AXI into .tools/
 
@@ -126,16 +128,23 @@ defaults:
   network: replay                # replay | record | live
   judge_model: claude-haiku-4-5
 
+scoring:
+  token_metric: tool             # default; `session` scores whole-session tokens instead
+
 arms:
   axi:
     tools: [Bash]
     allow: ["Bash(axi-fetch:*)"]
     deny: ["Bash(axi-fetch update:*)"]
-    skills: [skills/axi-fetch]
+    hooks: { SessionStart: hooks/usage.sh }   # ambient usage (or skills: + skill_delivery)
     path: [.tools/node_modules/.bin]
   webfetch:                      # one or more baselines: built-in tools, CLIs, MCP servers
     tools: [WebFetch]
     allow: [WebFetch]
+  curl:
+    tools: [Bash]
+    allow: ["Bash(curl:*)", "Bash(grep:*)", "Bash(head:*)"]
+    hooks: { SessionStart: hooks/curl-usage.sh }
 ```
 
 ```yaml
@@ -178,8 +187,8 @@ The arena spends most of its effort on keeping the comparison honest:
 - **Two token views.** *Session* tokens (cost-weighted, everything the session cost) and *tool*
   tokens (only what tool calls added, plus side models such as WebFetch's summarizer). Fixed session
   overhead (~9–12k tokens of system prompt and tool definitions) dilutes session-level percentages:
-  axi-fetch's −61% session saving on a docs page is −95% in tool tokens. Packs choose which one is
-  scored with `scoring.token_metric`.
+  axi-fetch's −62% session saving on a docs page is −95% in tool tokens. Tool tokens are scored by
+  default (`scoring.token_metric: tool`); session tokens stay visible.
 - **Correctness is rewarded, not just gated.** Being more correct than native adds to the score.
 - **Hidden costs are counted.** Tokens are summed over every model a trial used, so WebFetch's
   internal summarizer counts too. Scored tokens are cost-weighted (cache reads ×0.1, writes ×1.25,
@@ -198,19 +207,37 @@ token view is measured: each call's cost is how much the next API call's prompt 
 
 <p align="center"><img src="docs/match.png" alt="Match detail: per-metric bars, side-by-side medians, and a per-command token breakdown for each arm" width="820"></p>
 
-## First results: axi-fetch vs WebFetch
+## Results: axi-fetch 0.2.0
 
-The reference pack benchmarks [axi-fetch](https://github.com/tforgach/axi-fetch) against Claude Code's
-built-in `WebFetch`, with 6 tasks (including 2 canaries) on Claude Haiku 4.5, 3 trials per arm, replayed network:
+The reference pack benchmarks [axi-fetch](https://github.com/tforgach/axi-fetch) 0.2.0 (usage
+delivered as ambient context) against Claude Code's built-in `WebFetch` and against raw `curl`.
+6 tasks (2 of them canaries), Claude Haiku 4.5, 3 trials per arm, replayed network, scored on tool
+tokens. The AXI was **100% correct on every task** and made zero escapes.
 
-**Arena Score −43.6** (95% CI −48.4 to −31.1). Both arms were about equally correct, and the AXI arm made
-zero escapes. The AXI still lost on turns (2–3×), time (+50–80%) and tokens (+20–55%). The breakdown
-shows why: loading the skill costs a turn and about 900 tokens on every task, and the 1,500-character
-default truncation leads to a second `--full` call on long pages. Axi-fetch's own benchmark measured
-output size (97% smaller than raw HTML). A likely reason that edge didn't carry over: WebFetch also
-hands the agent a short summary, not raw HTML. Gaps like this are what the arena exists to find.
+**Arena Score +31.9** (95% CI +28.8 to +35.7), significant against both baselines.
 
-These are early numbers: one model, one baseline, a small task set.
+| Task | Tool tokens vs WebFetch | vs curl | Turns (vs curl) |
+|---|--:|--:|--:|
+| python-asyncio-timeout (long docs page) | **−95%** | **−89%** | 2 vs 12 |
+| wiki-token-bucket | **−91%** | **−88%** | 2 vs 3 |
+| canary-release-notes (answer deep in the page) | **−89%** | **−90%** | 2 vs 2 |
+| example-title | −46% | −10% | 2 vs 2 |
+| canary-status-table | −36% | −25% | 2 vs 2 |
+| http-404 | −16% | −31% | 2 vs 2 |
+
+By baseline: **+29.0 vs WebFetch** [+26.9, +31.4] and **+34.9 vs curl** [+28.8, +41.6].
+
+It took several steps to get there, all measured in the arena and scored the same way:
+
+| axi-fetch | Arena Score vs WebFetch |
+|---|---|
+| 0.1.x, usage delivered as a skill | −49.0: extra turns for the skill load, then `--full`, then a `Read` of an output too big to show inline |
+| 0.1.x, usage delivered by a hook | +4.8 (not significant) |
+| **0.2.0** (`--find`, paging, leaner defaults) + hook | **+29.0** |
+
+Session totals, which include ~9–12k tokens of fixed system-prompt and tool overhead and are noisy
+with prompt-cache warmth, show the same direction but smaller: −62% on the docs page and −42% on
+Wikipedia. That's why the score uses tool tokens by default. Early numbers: one model, a small task set.
 
 ## Repository layout
 

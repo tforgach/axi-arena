@@ -11,13 +11,16 @@ export interface ScoringConfig {
    */
   correctness_weight?: number;
   /**
-   * Which token count the efficiency score uses: "session" (everything the session cost,
-   * cost-weighted) or "tool" (only what tool calls added, plus side models). Default "session".
+   * Which token count the efficiency score uses: "tool" (what tool calls added to the context,
+   * plus side models; the difference an AXI actually makes) or "session" (everything the
+   * session cost, cost-weighted, including fixed overhead that dilutes the difference).
+   * Default "tool".
    */
   token_metric?: "session" | "tool";
 }
 
 export const DEFAULT_CORRECTNESS_WEIGHT = 1;
+export const DEFAULT_TOKEN_METRIC = "tool" as const;
 
 export interface ScoredTrial {
   task_id: string;
@@ -90,13 +93,17 @@ const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.l
 const scorable = (t: ScoredTrial) =>
   !["setup_error", "queued", "running", "cancelled"].includes(t.status) && t.correctness != null;
 
-export function summarize(trials: ScoredTrial[], tokenMetric: "session" | "tool" = "session"): ArmSummary {
+export function summarize(trials: ScoredTrial[], tokenMetric: "session" | "tool" = DEFAULT_TOKEN_METRIC): ArmSummary {
   const med = (f: (t: ScoredTrial) => number | null) => median(trials.map(f).filter((x): x is number => x != null)) ?? 0;
+  // Trials recorded before tool tokens existed fall back to session tokens (backfill them with
+  // `axi-arena rescore <run> --metrics-only`) rather than reading as zero.
+  const hasTool = trials.some((t) => t.tool_tokens != null);
+  const useTool = tokenMetric === "tool" && hasTool;
   return {
     n: trials.length,
     // Correctness is a rate, so it's averaged; efficiency metrics use medians.
     correctness: mean(trials.map((t) => t.correctness ?? 0)),
-    tokens: med((t) => (tokenMetric === "tool" ? (t.tool_tokens ?? null) : t.tokens_weighted)),
+    tokens: med((t) => (useTool ? (t.tool_tokens ?? null) : t.tokens_weighted)),
     sessionTokens: med((t) => t.tokens_weighted),
     toolTokens: med((t) => t.tool_tokens ?? null),
     turns: med((t) => t.num_turns),
@@ -161,7 +168,7 @@ export function computeScoreboard(trials: ScoredTrial[], cfg: ScoringConfig, ite
     }
   }
 
-  const tm = cfg.token_metric ?? "session";
+  const tm = cfg.token_metric ?? DEFAULT_TOKEN_METRIC;
   const point = groups.map((g) => ({ g, s: scoreMatch(summarize(g.axi, tm), summarize(g.base, tm), cfg) }));
 
   // Bootstrap: resample trials within each arm of every match, jointly, so aggregates get CIs too.

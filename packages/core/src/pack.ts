@@ -93,8 +93,8 @@ export const ManifestSchema = z.object({
         .default({ min_correctness: 0.8, max_regression: 0.05 }),
       /** Score += weight × (axi − baseline correctness) when the gate passes (0 disables the reward). */
       correctness_weight: z.number().min(0).default(1),
-      /** Token count the efficiency score uses: whole-session (default) or only what tools added. */
-      token_metric: z.enum(["session", "tool"]).default("session"),
+      /** Token count the efficiency score uses: what tools added (default) or the whole session. */
+      token_metric: z.enum(["session", "tool"]).default("tool"),
     })
     .prefault({}),
   arms: z.record(z.string(), ArmSchema).refine((a) => "axi" in a, "arms must include an `axi` arm").refine(

@@ -49,6 +49,15 @@ test("correctness beyond the baseline is rewarded; a small in-tolerance regressi
   assert.equal(noReward.score, 0);
 });
 
+test("tool tokens are scored by default; trials without them fall back to session tokens", () => {
+  const withTool = [trial("axi", { tokens_weighted: 1000, tool_tokens: 100 }), trial("native", { tokens_weighted: 1000, tool_tokens: 1000 })];
+  const m = computeScoreboard(withTool, cfg).matches[0]!;
+  assert.ok(Math.abs(m.r.tokens - 0.9) < 1e-9, "scored on tool tokens (−90%), not the equal session totals");
+  assert.equal(computeScoreboard(withTool, { ...cfg, token_metric: "session" }).matches[0]!.r.tokens, 0);
+  const legacy = [trial("axi", { tokens_weighted: 500, tool_tokens: null }), trial("native", { tokens_weighted: 1000, tool_tokens: null })];
+  assert.ok(Math.abs(computeScoreboard(legacy, cfg).matches[0]!.r.tokens - 0.5) < 1e-9, "no tool tokens recorded → session fallback");
+});
+
 test("scoreboard: CI needs ≥2 trials per arm, is reproducible, and flags significance", () => {
   const single = computeScoreboard([trial("axi"), trial("native")], cfg);
   assert.equal(single.matches[0].ci, null);

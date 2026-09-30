@@ -215,8 +215,8 @@ after:  scripts/cleanup.sh
 | Metric | Source |
 |---|---|
 | `correctness` ∈ [0,1] | LLM judge (§6.2) |
-| `tool_tokens` | **What the tools put into play**: measured context each tool call added (next prompt growth), plus side-model tokens (e.g. WebFetch's summarizer, found as the usage the main loop doesn't account for, including dated same-family model entries). Excludes the fixed session overhead that dilutes session-level percentages. `scoring.token_metric: tool` scores on it. |
-| `tokens_weighted` **(scored by default)** | Cost-weighted input-token equivalents, summed over every model in `modelUsage`: input ×1, cache write ×1.25, cache read ×0.1, output ×5. These are ratios to the model's own input price and hold for all current models. Models are not scaled by their absolute price. *(Decided after M1: cache reads made up most of the plain sum.)* |
+| `tool_tokens` | **What the tools put into play**: measured context each tool call added (next prompt growth), plus side-model tokens (e.g. WebFetch's summarizer, found as the usage the main loop doesn't account for, including dated same-family model entries). Excludes the fixed session overhead that dilutes session-level percentages. **Scored by default** (`scoring.token_metric: tool`). *(Decided 2026-09-30: tool tokens are the actual difference between an AXI and its native counterpart; session totals carry ~9–12k of identical fixed overhead per session and prompt-cache-warmth noise that depends on trial scheduling.)* |
+| `tokens_weighted` (shown, not scored by default) | Cost-weighted input-token equivalents, summed over every model in `modelUsage`: input ×1, cache write ×1.25, cache read ×0.1, output ×5. These are ratios to the model's own input price and hold for all current models. Models are not scaled by their absolute price. *(Decided after M1: cache reads made up most of the plain sum.)* |
 | `tokens_total` | Plain sum over `modelUsage` of input + cache_creation + cache_read + output. **Includes side-model calls**, e.g. WebFetch's internal summarizer. *(M0: confirmed. On a Sonnet trial, WebFetch's summarizer shows up as a separate `claude-haiku-4-5` entry.)* |
 | `tokens_breakdown` | Per model and per kind (input/output/cache), plus estimated **tool-output tokens**: the tokens tool results added to context. This is the AXI's direct lever. |
 | `turns` | `num_turns` |
@@ -238,7 +238,7 @@ For each (task, model, baseline):
 
 1. Take the **median** of each metric over the N trials per arm.
 2. Relative improvement per efficiency metric, where higher is better for the AXI:
-   `r_m = clamp((baseline_m − axi_m) / baseline_m, −1, 1)` for m ∈ {tokens (= `tokens_weighted`), turns, time, errors}. Errors include escape attempts. If `errors` is 0 on both sides, r = 0.
+   `r_m = clamp((baseline_m − axi_m) / baseline_m, −1, 1)` for m ∈ {tokens (= `tool_tokens` by default, `tokens_weighted` with `token_metric: session`), turns, time, errors}. Extra turns still cost the AXI through the turns metric. Errors include escape attempts. If `errors` is 0 on both sides, r = 0.
 3. `efficiency = Σ w_m · r_m` using the pack's weights (default tokens 0.4, turns 0.2, time 0.2, errors 0.2).
 4. **Correctness reward:** when the gate passes, `score = efficiency + correctness_weight × (axi − baseline correctness)` (default weight 1; 0 disables). Being more correct than native is rewarded, and a regression inside the tolerance costs a little. *(Added after work testing: correctness was a gate but never a reward.)*
 5. **Correctness gate:**

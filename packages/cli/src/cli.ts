@@ -242,13 +242,13 @@ function printScoreboard(trials: TrialRow[], scoring: ScoringConfig): void {
     !gate ? "✗ gate" : m.ci == null ? "n<2" : m.significant ? "" : "n.s.";
   const delta = (axi: number, base: number) => (base > 0 ? `${axi <= base ? "−" : "+"}${fmt(Math.abs(1 - axi / base) * 100, 0)}%` : "–");
 
-  const rows: string[][] = [["model", "task", "vs", "correct axi/base", "w-tokens", "tool tok", "turns", "time", "errors", "score", "95% CI", ""]];
+  const rows: string[][] = [["model", "task", "vs", "correct axi/base", "tool tok", "session", "turns", "time", "errors", "score", "95% CI", ""]];
   for (const m of board.matches as Match[]) {
     rows.push([
       m.model, m.task, m.baseline,
       `${pct(m.axi.correctness)} / ${pct(m.base.correctness)}`,
-      delta(m.axi.sessionTokens, m.base.sessionTokens),
       delta(m.axi.toolTokens, m.base.toolTokens),
+      delta(m.axi.sessionTokens, m.base.sessionTokens),
       delta(m.axi.turns, m.base.turns),
       delta(m.axi.time, m.base.time),
       `${fmt(m.axi.errors, 1)} / ${fmt(m.base.errors, 1)}`,
@@ -258,9 +258,9 @@ function printScoreboard(trials: TrialRow[], scoring: ScoringConfig): void {
     ]);
   }
   printTable(rows, new Set([3, 4, 5, 6, 7, 8, 9]));
-  const metric = scoring.token_metric ?? "session";
+  const metric = scoring.token_metric ?? "tool";
   console.log(
-    `w-tokens = whole session, cost-weighted · tool tok = what tool calls added (+ side models) · scored: ${metric === "tool" ? "tool tok" : "w-tokens"}\n` +
+    `tool tok = what tool calls added to the context (+ side models) · session = whole session, cost-weighted · scored: ${metric === "tool" ? "tool tok" : "session"}\n` +
       "tokens/turns/time: AXI relative to baseline (− is better) · errors: median axi / base, incl. escapes · score includes the correctness bonus",
   );
   const missed = trials.filter((t) => (t.fixture_misses ?? 0) > 0);
