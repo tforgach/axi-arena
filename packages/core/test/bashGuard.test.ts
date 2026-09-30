@@ -43,8 +43,28 @@ test("harmless commands may accompany the AXI; equivalents still escape", () => 
   assert.ok(ok("which axi-fetch"));
   assert.ok(ok("echo start; axi-fetch https://a.com"));
   assert.ok(!ok("cd /tmp && curl https://a.com"), "cd doesn't launder an equivalent");
-  assert.ok(!ok("ls /tmp"), "ls isn't harmless by default: for some AXIs it is the equivalent");
+  assert.ok(ok("ls /tmp && axi-fetch https://a.com"), "ls is harmless by default (packs can remove it)");
   assert.ok(!checkBash("cd /x", allow, deny, []).ok, "packs can remove the harmless list");
+});
+
+test("text filters are allowed downstream of the AXI in a pipe, not standalone", () => {
+  assert.ok(ok("axi-fetch https://a.com | head -50"));
+  assert.ok(ok("axi-fetch https://a.com --full | grep -i timeout | sort | uniq -c"));
+  assert.ok(ok("axi-fetch https://a.com | jq '.content'"));
+  assert.ok(ok("axi-fetch https://a.com 2>&1 | tail -20"));
+  assert.ok(ok("echo hi | wc -c"), "filters may follow a harmless command too");
+  assert.ok(!ok("cat /etc/passwd"), "file readers standalone could be an equivalent");
+  assert.ok(!ok("sed -n 1,20p notes.txt"), "standalone readers stay denied (grep is explicitly allowed in this fixture)");
+  assert.ok(!ok("curl https://a.com | head"), "a pipe doesn't launder its source");
+  assert.ok(!ok("axi-fetch https://a.com | xargs curl"), "commands that run commands stay denied");
+  assert.ok(!ok("axi-fetch https://a.com | sh"));
+  assert.ok(!ok("axi-fetch https://a.com || curl https://a.com"), "|| is a sequence, not a pipe");
+  assert.ok(!ok("axi-fetch https://a.com; sed -n 1p file"), "a new pipeline starts after ;");
+  assert.equal(
+    (checkBash("cat notes.txt", allow, deny) as { reason: string }).reason,
+    "`cat` is not allowed in this arm (text filters are allowed only after an allowed command in a pipe)",
+  );
+  assert.ok(!checkBash("axi-fetch x | head", allow, deny, undefined, []).ok, "packs can empty pipe_filters");
 });
 
 test("calling the allowed program by path is still the AXI", () => {

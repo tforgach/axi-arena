@@ -66,8 +66,8 @@ export function TokenFlow({ runId, task, model, arms }: { runId: string; task: s
             </table>
             {a.commands.some((c) => SIDE_MODEL_TOOLS.includes(c.label) && !c.sideTokens) && (
               <div className="small" style={{ padding: "0 16px 8px" }}>
-                ⚠ {a.commands.filter((c) => SIDE_MODEL_TOOLS.includes(c.label)).map((c) => c.label).join(", ")} runs its own model call. Here it used the
-                same model as the trial, so those tokens are in this arm's totals but can't be separated per call. Run a different trial model to see them.
+                ⚠ {a.commands.filter((c) => SIDE_MODEL_TOOLS.includes(c.label)).map((c) => c.label).join(", ")} normally runs its own model call, but none
+                was found in this arm's usage, so its side cost may be missing here. It is still counted in the session totals.
               </div>
             )}
             <div className="muted small" style={{ padding: "0 16px 12px" }}>

@@ -5,11 +5,31 @@
 export type GuardVerdict = { ok: true } | { ok: false; reason: string };
 
 /**
- * Commands that can't stand in for any AXI, allowed inside chained commands in every arm
- * (e.g. `cd <dir> && axi-fetch …`). Kept minimal on purpose: for some AXIs `ls`, `cat` or `grep`
- * *are* the equivalent, so packs extend this list explicitly rather than by default.
+ * Commands allowed anywhere in every arm: they can't fetch or substitute for an AXI's data.
+ * Anything that runs *other* commands (xargs, env, command, sh, eval…) is excluded on purpose,
+ * since it would launder an escape. Packs override with `harmless_commands`.
  */
-export const DEFAULT_HARMLESS_COMMANDS = ["cd", "pwd", "echo", "printf", "true", "false", "which", "type"];
+export const DEFAULT_HARMLESS_COMMANDS = [
+  "cd", "pwd", "echo", "printf", "true", "false", "which", "type", "test", "[", "sleep", "date",
+  "export", "unset", "ls", "mkdir", "basename", "dirname",
+];
+
+/**
+ * Text filters allowed downstream of an allowed or harmless command in a pipe
+ * (`axi-fetch url | head -50`, `| grep -i foo`, `| jq .`): they only see that command's output,
+ * so they can't be an equivalent. Standalone, file readers stay denied. Packs override with
+ * `pipe_filters`.
+ */
+export const DEFAULT_PIPE_FILTERS = [
+  "head", "tail", "grep", "egrep", "fgrep", "rg", "sed", "awk", "cut", "tr", "sort", "uniq", "wc",
+  "jq", "yq", "cat", "less", "more", "column", "fold", "fmt", "nl", "tee", "rev", "paste",
+];
+
+export interface Segment {
+  text: string;
+  /** True when this segment reads the previous one's output through `|`. */
+  piped: boolean;
+}
 
 /** Extract allowed command prefixes from rules like `Bash(axi-fetch:*)` or `Bash(gh pr *)`. */
 export function bashPrefixes(rules: string[]): string[] {
@@ -28,8 +48,19 @@ export function bashPrefixes(rules: string[]): string[] {
  * about (command/process substitution, subshells, heredocs, unterminated quotes).
  */
 export function splitSegments(command: string): string[] | null {
-  const segs: string[] = [];
+  return splitPipeline(command)?.map((s) => s.text) ?? null;
+}
+
+/** Like splitSegments, but records which segments are fed by a pipe. */
+export function splitPipeline(command: string): Segment[] | null {
+  const segs: Segment[] = [];
   let cur = "";
+  let piped = false;
+  const push = (next: boolean) => {
+    if (cur.trim()) segs.push({ text: cur.trim(), piped });
+    cur = "";
+    piped = next;
+  };
   let quote: "'" | '"' | null = null;
   for (let i = 0; i < command.length; i++) {
     const c = command[i];
@@ -47,16 +78,14 @@ export function splitSegments(command: string): string[] | null {
     if (c === "<" && command[i + 1] === "<") return null;
     // `2>&1` / `&>file` are redirections, not command separators.
     if (c === "&" && (cur.endsWith(">") || command[i + 1] === ">")) { cur += c; continue; }
-    if (c === ";" || c === "&" || c === "|" || c === "\n") {
-      segs.push(cur);
-      cur = "";
-      continue;
-    }
+    if (c === "|" && command[i + 1] === "|") { push(false); i++; continue; } // `||` is a sequence, not a pipe
+    if (c === "|") { push(true); continue; }
+    if (c === ";" || c === "&" || c === "\n") { push(false); continue; }
     cur += c;
   }
   if (quote) return null;
-  segs.push(cur);
-  return segs.map((s) => s.trim()).filter(Boolean);
+  push(false);
+  return segs;
 }
 
 function matchesPrefix(segment: string, prefix: string): boolean {
@@ -75,17 +104,26 @@ export function checkBash(
   allowPrefixes: string[],
   denyPrefixes: string[] = [],
   harmless: string[] = DEFAULT_HARMLESS_COMMANDS,
+  pipeFilters: string[] = DEFAULT_PIPE_FILTERS,
 ): GuardVerdict {
-  const segs = splitSegments(command);
+  const segs = splitPipeline(command);
   if (!segs) return { ok: false, reason: "uses substitution, subshells or heredocs" };
   if (segs.length === 0) return { ok: false, reason: "empty command" };
-  for (const raw of segs) {
+  // Whether the current pipeline started with an allowed or harmless command.
+  let pipelineOk = false;
+  for (const seg of segs) {
+    const raw = seg.text;
     const s = withoutProgramPath(raw);
     const denied = denyPrefixes.find((p) => matchesPrefix(s, p));
     if (denied) return { ok: false, reason: `\`${denied}\` is denied in this arm` };
-    if (allowPrefixes.some((p) => matchesPrefix(s, p))) continue;
-    if (harmless.some((h) => matchesPrefix(raw, h))) continue;
-    return { ok: false, reason: `\`${raw.split(/\s+/)[0]}\` is not allowed in this arm` };
+    if (seg.piped && pipelineOk && pipeFilters.some((f) => matchesPrefix(s, f))) continue;
+    const ok = allowPrefixes.some((p) => matchesPrefix(s, p)) || harmless.some((h) => matchesPrefix(raw, h));
+    if (!ok) {
+      const program = raw.split(/\s+/)[0] ?? raw;
+      const hint = pipeFilters.includes(program) ? " (text filters are allowed only after an allowed command in a pipe)" : "";
+      return { ok: false, reason: `\`${program}\` is not allowed in this arm${hint}` };
+    }
+    if (!seg.piped) pipelineOk = true;
   }
   return { ok: true };
 }

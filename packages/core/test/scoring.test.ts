@@ -12,7 +12,7 @@ const trial = (arm: string, o: Partial<ScoredTrial> = {}): ScoredTrial => ({
   tokens_weighted: 1000, num_turns: 2, duration_ms: 1000, tool_errors: 0, error_recoveries: 0, escape_attempts: 0, ...o,
 });
 
-const arm = (o: Partial<ReturnType<typeof summarize>>) => ({ n: 3, correctness: 1, tokens: 1000, turns: 2, time: 1000, errors: 0, ...o });
+const arm = (o: Partial<ReturnType<typeof summarize>>) => ({ n: 3, correctness: 1, tokens: 1000, sessionTokens: 1000, toolTokens: 0, turns: 2, time: 1000, errors: 0, ...o });
 
 test("parity scores 0; halving tokens with everything else equal scores +20", () => {
   assert.equal(scoreMatch(arm({}), arm({}), cfg).score, 0);
@@ -38,6 +38,15 @@ test("correctness gate: below the floor, or regressing past tolerance, caps the 
 
   const bothBad = scoreMatch(arm({ correctness: 0.5 }), arm({ correctness: 0.5 }), cfg);
   assert.equal(bothBad.gatePassed, false, "below min_correctness even at parity");
+});
+
+test("correctness beyond the baseline is rewarded; a small in-tolerance regression costs a little", () => {
+  const better = scoreMatch(arm({ correctness: 1 }), arm({ correctness: 0.67 }), cfg);
+  assert.ok(better.gatePassed);
+  assert.ok(Math.abs(better.score - 0.33) < 1e-9, "parity efficiency + 1.0 × 0.33");
+  assert.ok(Math.abs(scoreMatch(arm({ correctness: 0.97 }), arm({ correctness: 1 }), cfg).score - -0.03) < 1e-9);
+  const noReward = scoreMatch(arm({ correctness: 1 }), arm({ correctness: 0.67 }), { ...cfg, correctness_weight: 0 });
+  assert.equal(noReward.score, 0);
 });
 
 test("scoreboard: CI needs ≥2 trials per arm, is reproducible, and flags significance", () => {

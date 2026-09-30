@@ -7,7 +7,7 @@ import { streamSSE } from "hono/streaming";
 import { serve } from "@hono/node-server";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
-  ManifestSchema, callCosts, commandLabel, computeScoreboard, median, getRun, getTrial, listRuns, openDb, packRuns, runTrials, transcriptItems,
+  ManifestSchema, callCosts, commandLabel, computeScoreboard, median, requestCancel, getRun, getTrial, listRuns, openDb, packRuns, runTrials, transcriptItems,
   trialEventsSince, type Db, type RunRow, type ScoringConfig, type TrialRow,
 } from "@axi-arena/core";
 
@@ -169,6 +169,16 @@ export function createApp(db: Db = openDb()): Hono {
       }
     }),
   );
+
+  // Cancel a running run. The CLI process running it polls the flag and stops in-flight trials.
+  // A custom header is required so a cross-site form/fetch can't trigger it (no CORS is served).
+  app.post("/api/runs/:id/cancel", (c) => {
+    if (c.req.header("x-axi-arena") !== "1") return c.json({ error: "missing x-axi-arena header" }, 403);
+    const run = getRun(db, c.req.param("id"));
+    if (!run) return c.json({ error: "run not found" }, 404);
+    if (!requestCancel(db, run.id)) return c.json({ error: `run is ${run.status}, not running` }, 409);
+    return c.json({ ok: true });
+  });
 
   app.get("/api/runs/:id/commands", (c) => {
     const task = c.req.query("task");

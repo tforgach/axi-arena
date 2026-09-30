@@ -8,6 +8,7 @@ import type { CheckResult } from "./checks.ts";
 import { tokensByModel } from "./metrics.ts";
 import type { Task } from "./pack.ts";
 import { arenaHome } from "./paths.ts";
+import type { AuthSetup } from "./config.ts";
 
 export const DEFAULT_JUDGE_MODEL = "claude-haiku-4-5";
 
@@ -70,7 +71,7 @@ function judgePrompt(task: Task, answer: string, checks: CheckResult[], transcri
   const checkLines = checks.length
     ? checks.map((c) => `- [${c.passed ? "PASS" : "FAIL"}] ${c.type}${c.required ? " (required)" : ""}: ${c.detail}`).join("\n")
     : "(none)";
-  return `You are grading an AI agent's answer to a task. Grade only correctness against the rubric. Judge meaning, not wording: an answer that conveys the required facts in different words is fully correct, unless the rubric explicitly says exact wording is required. The reference answer is one acceptable phrasing, not the only one. Do not reward or penalize style, length, or which tools were used, except where the rubric says so. If the answer is a refusal or says it could not get the information, score 0.
+  return `You are grading an AI agent's answer to a task. Grade only correctness against the rubric. Judge meaning, not wording: an answer that conveys the required facts in different words is fully correct, unless the rubric explicitly says exact wording is required. The reference answer is one acceptable phrasing, not the only one. Do not deduct for omitting details the rubric does not explicitly require, or for extra correct detail. Do not reward or penalize style, length, or which tools were used, except where the rubric says so. If the answer is a refusal or says it could not get the information, score 0.
 
 <task>
 ${task.prompt.trim()}
@@ -102,6 +103,19 @@ export interface JudgeInput {
   messages: SDKMessage[];
   judgeModel: string;
   useJudge: boolean;
+  auth?: AuthSetup;
+}
+
+/** Isolated env for arena-internal model calls (judge, preflight): no tools, same auth as trials. */
+export function internalEnv(auth?: AuthSetup): Record<string, string> {
+  return {
+    PATH: "/usr/bin:/bin",
+    HOME: process.env.HOME ?? "",
+    USER: process.env.USER ?? "",
+    CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
+    CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    ...(auth?.env ?? (process.env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } : {})),
+  };
 }
 
 export async function judge(i: JudgeInput): Promise<Judgment> {
@@ -139,14 +153,8 @@ export async function judge(i: JudgeInput): Promise<Judgment> {
         skills: [],
         persistSession: false,
         outputFormat: { type: "json_schema", schema: SCHEMA as unknown as Record<string, unknown> },
-        env: {
-          PATH: "/usr/bin:/bin",
-          HOME: process.env.HOME ?? "",
-          USER: process.env.USER ?? "",
-          CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
-          CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
-          ...(process.env.ANTHROPIC_API_KEY ? { ANTHROPIC_API_KEY: process.env.ANTHROPIC_API_KEY } : {}),
-        },
+        env: internalEnv(i.auth),
+        ...(i.auth && Object.keys(i.auth.settings).length ? { settings: i.auth.settings } : {}),
       },
     })) {
       if (m.type === "result") {

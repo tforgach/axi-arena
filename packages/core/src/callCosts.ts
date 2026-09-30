@@ -4,6 +4,9 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { DEFAULT_HARMLESS_COMMANDS, splitSegments } from "./bashGuard.ts";
 
+/** Below this, a same-model residual is accounting noise, not a side call. */
+const SAME_MODEL_SIDE_MIN = 200;
+
 /** Tools whose work runs on a side model (its tokens appear in modelUsage, not in the context). */
 const SIDE_MODEL_TOOLS = new Set(["WebFetch", "WebSearch", "Task", "Agent"]);
 
@@ -81,14 +84,29 @@ export function callCosts(messages: SDKMessage[]): CostBreakdown {
     }
   });
 
-  // Attribute side-model usage (models other than the trial's own) to side-model tool calls.
+  // Attribute side-model usage to side-model tool calls (e.g. WebFetch's summarizer). Other
+  // models count whole. On the trial's own model, side calls are whatever its input usage
+  // exceeds the main loop's calls by (per-message usage covers every main-loop call; its input
+  // side is exact, while streamed output counts are partial, so only input is compared).
   if (result && mainModel) {
-    const main = mainModel;
-    const side = Object.entries(result.modelUsage ?? {})
-      .filter(([model]) => !main.startsWith(model) && !model.startsWith(main))
-      .reduce((n, [, u]) => n + (u.inputTokens ?? 0) + (u.outputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0), 0);
+    const usage = Object.entries(result.modelUsage ?? {});
+    const inputOf = (u: (typeof usage)[number][1]) => (u.inputTokens ?? 0) + (u.cacheReadInputTokens ?? 0) + (u.cacheCreationInputTokens ?? 0);
+    // The main loop's entry: an exact match of the session model, else the largest related entry.
+    // A dated variant (claude-haiku-4-5-20251001 next to claude-haiku-4-5) is a separate
+    // side-model call, e.g. WebFetch's summarizer, not the main loop.
+    const related = usage.filter(([m]) => mainModel.startsWith(m) || m.startsWith(mainModel));
+    const mainKey =
+      usage.find(([m]) => m === mainModel)?.[0] ??
+      related.sort((a, b) => inputOf(b[1]) - inputOf(a[1]))[0]?.[0];
+    const mainLoopInput = calls.reduce((n, c) => n + c.context, 0);
+    let side = 0;
+    for (const [model, u] of usage) {
+      const input = inputOf(u);
+      if (model !== mainKey) side += input + (u.outputTokens ?? 0);
+      else if (input - mainLoopInput > SAME_MODEL_SIDE_MIN) side += input - mainLoopInput;
+    }
     const sideCalls = [...toolNames].filter(([, name]) => SIDE_MODEL_TOOLS.has(name)).map(([id]) => id);
-    if (side > 0 && sideCalls.length) for (const id of sideCalls) out[id].sideTokens = Math.round(side / sideCalls.length);
+    if (side > 0 && sideCalls.length) for (const id of sideCalls) out[id]!.sideTokens = Math.round(side / sideCalls.length);
   }
 
   return { baseContext: calls[0]?.context ?? null, finalContext: calls.at(-1)?.context ?? null, calls: out };

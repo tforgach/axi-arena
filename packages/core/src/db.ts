@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS runs (
   axi_version   TEXT,
   config_json   TEXT NOT NULL,
   status        TEXT NOT NULL,          -- running | done | failed | aborted
+  cancel_requested INTEGER NOT NULL DEFAULT 0,  -- set by the web UI; the runner polls it
   started_at    TEXT NOT NULL,
   finished_at   TEXT,
   error         TEXT
@@ -26,7 +27,7 @@ CREATE TABLE IF NOT EXISTS trials (
   arm              TEXT NOT NULL,
   model            TEXT NOT NULL,
   trial_index      INTEGER NOT NULL,
-  status           TEXT NOT NULL,       -- queued | running | success | max_turns | timeout | error | setup_error
+  status           TEXT NOT NULL,       -- queued | running | success | max_turns | timeout | error | setup_error | cancelled
   started_at       TEXT,
   finished_at      TEXT,
   result_text      TEXT,
@@ -40,7 +41,9 @@ CREATE TABLE IF NOT EXISTS trials (
   duration_api_ms  INTEGER,
   tokens_total     INTEGER,
   tokens_weighted  INTEGER,             -- scored: cost-weighted input-token equivalents
+  tool_tokens      INTEGER,             -- context added by tool calls + side-model tokens (measured)
   tokens_json      TEXT,                -- per-model usage breakdown
+  model_id         TEXT,                -- model the session actually ran (after alias/provider resolution)
   network          TEXT,                -- replay | record | live
   fixture_misses   INTEGER,             -- replay requests with no fixture (harness gap)
   proxy_json       TEXT,                -- proxy summary: hits/recorded/misses
@@ -68,8 +71,11 @@ export type Db = DatabaseSync;
 
 /** Additive migrations for DBs created by older versions. */
 const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
+  { table: "runs", column: "cancel_requested", ddl: "ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0" },
   { table: "trials", column: "tokens_weighted", ddl: "ALTER TABLE trials ADD COLUMN tokens_weighted INTEGER" },
+  { table: "trials", column: "tool_tokens", ddl: "ALTER TABLE trials ADD COLUMN tool_tokens INTEGER" },
   { table: "trials", column: "error_recoveries", ddl: "ALTER TABLE trials ADD COLUMN error_recoveries INTEGER" },
+  { table: "trials", column: "model_id", ddl: "ALTER TABLE trials ADD COLUMN model_id TEXT" },
   { table: "trials", column: "network", ddl: "ALTER TABLE trials ADD COLUMN network TEXT" },
   { table: "trials", column: "fixture_misses", ddl: "ALTER TABLE trials ADD COLUMN fixture_misses INTEGER" },
   { table: "trials", column: "proxy_json", ddl: "ALTER TABLE trials ADD COLUMN proxy_json TEXT" },
@@ -122,7 +128,9 @@ export interface TrialRow {
   duration_api_ms: number | null;
   tokens_total: number | null;
   tokens_weighted: number | null;
+  tool_tokens: number | null;
   tokens_json: string | null;
+  model_id: string | null;
   network: string | null;
   fixture_misses: number | null;
   proxy_json: string | null;
@@ -165,13 +173,13 @@ export type TrialOutcome = Omit<
 export function finishTrial(db: Db, id: string, o: TrialOutcome): void {
   db.prepare(
     `UPDATE trials SET status = ?, finished_at = ?, result_text = ?, sdk_subtype = ?, num_turns = ?, tool_calls = ?,
-       tool_errors = ?, error_recoveries = ?, escape_attempts = ?, duration_ms = ?, duration_api_ms = ?, tokens_total = ?, tokens_weighted = ?, tokens_json = ?,
-       cost_usd = ?, error = ?, network = ?, fixture_misses = ?, proxy_json = ?
+       tool_errors = ?, error_recoveries = ?, escape_attempts = ?, duration_ms = ?, duration_api_ms = ?, tokens_total = ?, tokens_weighted = ?, tool_tokens = ?, tokens_json = ?,
+       cost_usd = ?, error = ?, network = ?, model_id = ?, fixture_misses = ?, proxy_json = ?
      WHERE id = ?`,
   ).run(
     o.status, now(), o.result_text, o.sdk_subtype, o.num_turns, o.tool_calls, o.tool_errors, o.error_recoveries, o.escape_attempts,
-    o.duration_ms, o.duration_api_ms, o.tokens_total, o.tokens_weighted, o.tokens_json, o.cost_usd, o.error,
-    o.network, o.fixture_misses, o.proxy_json, id,
+    o.duration_ms, o.duration_api_ms, o.tokens_total, o.tokens_weighted, o.tool_tokens, o.tokens_json, o.cost_usd, o.error,
+    o.network, o.model_id, o.fixture_misses, o.proxy_json, id,
   );
 }
 
@@ -179,6 +187,11 @@ export function setGrade(db: Db, trialId: string, correctness: number | null, ch
   db.prepare(`UPDATE trials SET correctness = ?, checks_json = ?, judgment_json = ? WHERE id = ?`).run(
     correctness, checksJson, judgmentJson, trialId,
   );
+}
+
+/** Backfill measured tool tokens (rescore computes them from stored events). */
+export function setToolTokens(db: Db, trialId: string, toolTokens: number | null): void {
+  db.prepare(`UPDATE trials SET tool_tokens = ? WHERE id = ?`).run(toolTokens, trialId);
 }
 
 export function trialEvents(db: Db, trialId: string): unknown[] {
@@ -211,6 +224,23 @@ export function appendEvent(db: Db, trialId: string, seq: number, type: string, 
   db.prepare(`INSERT INTO events (trial_id, seq, ts, type, json) VALUES (?, ?, ?, ?, ?)`).run(
     trialId, seq, now(), type, JSON.stringify(payload),
   );
+}
+
+/** Ask a running run to stop (the runner polls this). Returns false if the run isn't running. */
+export function requestCancel(db: Db, runId: string): boolean {
+  const r = db.prepare(`UPDATE runs SET cancel_requested = 1 WHERE id = ? AND status = 'running'`).run(runId);
+  return Number(r.changes) > 0;
+}
+
+export function isCancelRequested(db: Db, runId: string): boolean {
+  const row = db.prepare(`SELECT cancel_requested FROM runs WHERE id = ?`).get(runId) as { cancel_requested: number } | undefined;
+  return row?.cancel_requested === 1;
+}
+
+/** Mark trials that never started as cancelled. */
+export function cancelQueuedTrials(db: Db, runId: string): number {
+  const r = db.prepare(`UPDATE trials SET status = 'cancelled', finished_at = ? WHERE run_id = ? AND status = 'queued'`).run(now(), runId);
+  return Number(r.changes);
 }
 
 export function listRuns(db: Db, limit = 20): RunRow[] {

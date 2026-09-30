@@ -18,7 +18,7 @@ export function TrialPage({ id }: { id: string }) {
           <h1 className="mono" style={{ fontSize: 20 }}>{t.task_id}</h1>
           <div className="meta" style={{ marginTop: 6 }}>
             <span>arm <b>{t.arm}</b></span>
-            <span>{t.model}</span>
+            <span>{t.model}{t.model_id && t.model_id !== t.model ? ` → ${t.model_id}` : ""}</span>
             <span>trial #{t.trial_index}</span>
             <StatusPill status={t.status} />
             {t.network && (
@@ -34,7 +34,7 @@ export function TrialPage({ id }: { id: string }) {
 
       <div className="tiles">
         <div className="card tile"><div className="label">Correctness</div><div className="value"><Correct value={t.correctness} /></div><div className="note">{t.judgment?.source?.replace("_", " ") ?? (live ? "grading after the trial…" : "not graded")}</div></div>
-        <div className="card tile"><div className="label">Tokens, cost-weighted</div><div className="value">{compact(t.tokens_weighted)}</div><div className="note">{num(t.tokens_total)} raw</div></div>
+        <div className="card tile"><div className="label">Tokens, cost-weighted</div><div className="value">{compact(t.tokens_weighted)}</div><div className="note">{num(t.tokens_total)} raw · {num(t.tool_tokens)} from tools</div></div>
         <div className="card tile"><div className="label">Turns · tool calls</div><div className="value">{t.num_turns ?? "–"} · {t.tool_calls ?? "–"}</div><div className="note">{t.error_recoveries ?? 0} error recoveries · {t.tool_errors ?? 0} errors</div></div>
         <div className="card tile"><div className="label">Time</div><div className="value">{secs(t.duration_ms)}</div><div className="note">{secs(t.duration_api_ms)} in API calls</div></div>
         <div className="card tile"><div className="label">Escape attempts</div><div className={`value${escapes ? " bad" : ""}`}>{escapes ?? "–"}</div><div className="note">{t.escape_attempts == null && live ? "so far · " : ""}reached for an equivalent tool</div></div>

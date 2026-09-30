@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useRun } from "../api.ts";
 import type { Match, Trial } from "../types.ts";
 import { compact, duration, secs, when } from "../format.ts";
@@ -45,6 +46,28 @@ function TrialsTable({ trials }: { trials: Trial[] }) {
   );
 }
 
+function CancelButton({ runId }: { runId: string }) {
+  const [state, setState] = useState<"idle" | "sending" | "requested" | string>("idle");
+  const cancel = async () => {
+    if (!window.confirm("Cancel this run? In-flight trials stop now; queued trials won't start. Finished trials are kept.")) return;
+    setState("sending");
+    try {
+      const res = await fetch(`/api/runs/${runId}/cancel`, { method: "POST", headers: { "x-axi-arena": "1" } });
+      const body = (await res.json()) as { error?: string };
+      setState(res.ok ? "requested" : body.error ?? `HTTP ${res.status}`);
+    } catch (e) {
+      setState(String(e));
+    }
+  };
+  if (state === "requested") return <span className="pill aborted" style={{ marginLeft: "auto" }}><span className="dot" />cancelling…</span>;
+  return (
+    <span style={{ marginLeft: "auto" }} className="row-gap">
+      {state !== "idle" && state !== "sending" && <span className="small bad">{state}</span>}
+      <button onClick={cancel} disabled={state === "sending"}>Cancel run</button>
+    </span>
+  );
+}
+
 export function RunPage({ id }: { id: string }) {
   const { data, error, live } = useRun(id);
   if (!data) return <Loading error={error} />;
@@ -77,6 +100,7 @@ export function RunPage({ id }: { id: string }) {
           <div className="row-gap">
             <b>{progress.done}/{progress.total}</b> trials done
             <span className="muted">· {progress.running} running · updates live</span>
+            <CancelButton runId={run.id} />
           </div>
           <div className="progress"><div style={{ width: `${(progress.done / Math.max(1, progress.total)) * 100}%` }} /></div>
         </div>

@@ -6,13 +6,17 @@ import { randomBytes } from "node:crypto";
 import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { buildArmPlugin, buildQueryOptions, cleanupClaudeProjectDir, trialEnv, trialWorkDir, type GuardDenial } from "./arm.ts";
 import { scriptRunner } from "./checks.ts";
-import { appendEvent, finishRun, finishTrial, insertRun, insertTrial, setGrade, startTrial, type Db, type TrialOutcome } from "./db.ts";
+import {
+  appendEvent, cancelQueuedTrials, finishRun, finishTrial, insertRun, insertTrial, isCancelRequested, setGrade, startTrial,
+  type Db, type TrialOutcome,
+} from "./db.ts";
 import { gradeTrial, type Grade } from "./grading.ts";
 import { computeMetrics } from "./metrics.ts";
 import { ensureCa } from "./certs.ts";
 import { FixtureStore } from "./fixtures.ts";
 import { fixtureDir, packPath, type Effort, type Network, type Pack, type Task } from "./pack.ts";
 import { proxyEnv, startProxy, type ProxyHandle } from "./proxy.ts";
+import { loadConfig, resolveAuth, resolveModel, type ArenaConfig, type AuthSetup } from "./config.ts";
 import { runDir as makeRunDir } from "./paths.ts";
 
 export interface RunOptions {
@@ -29,6 +33,9 @@ export interface RunOptions {
   useJudge: boolean;
   /** Overrides every task's network mode (e.g. `record`). */
   network?: Network;
+  /** Credentials/provider setup; resolved from ~/.axi-arena/config.yaml if omitted. */
+  auth?: AuthSetup;
+  config?: ArenaConfig;
 }
 
 /** Effective network mode for a task: run override → task → pack default. */
@@ -84,9 +91,9 @@ function runScript(pack: Pack, rel: string, env: Record<string, string>, log: (l
   if (res.status !== 0) throw new Error(`${rel} exited with ${res.status}`);
 }
 
-function detectAxiVersion(pack: Pack, trialDirForEnv: string): string | null {
+function detectAxiVersion(pack: Pack, trialDirForEnv: string, auth?: AuthSetup): string | null {
   if (!pack.axi_version_cmd) return null;
-  const env = trialEnv(pack, pack.arms.axi, trialDirForEnv);
+  const env = trialEnv(pack, pack.arms.axi, trialDirForEnv, {}, auth);
   const res = spawnSync("/bin/sh", ["-c", pack.axi_version_cmd], { cwd: pack.dir, env, encoding: "utf8", timeout: 30_000 });
   return res.status === 0 ? res.stdout.trim().split("\n")[0] || null : null;
 }
@@ -99,7 +106,15 @@ async function pool<T>(items: T[], limit: number, fn: (item: T) => Promise<void>
   await Promise.all(workers);
 }
 
-export async function executeRun(db: Db, pack: Pack, opts: RunOptions, hooks: RunHooks = {}, signal?: AbortSignal): Promise<string> {
+export async function executeRun(db: Db, pack: Pack, optsIn: RunOptions, hooks: RunHooks = {}, externalSignal?: AbortSignal): Promise<string> {
+  // One abort signal for Ctrl-C (external) and cancel requests from the web UI (polled below).
+  const cancel = new AbortController();
+  const signal = cancel.signal;
+  const onExternal = () => cancel.abort();
+  externalSignal?.addEventListener("abort", onExternal);
+  let cancelPoll: ReturnType<typeof setInterval> | undefined;
+  const config = optsIn.config ?? loadConfig();
+  const opts: RunOptions = { ...optsIn, config, auth: optsIn.auth ?? resolveAuth(config) };
   const runId = newRunId();
   const dir = makeRunDir(runId);
   const log = (l: string) => hooks.onLog?.(l);
@@ -114,19 +129,33 @@ export async function executeRun(db: Db, pack: Pack, opts: RunOptions, hooks: Ru
     }
     setupDone = true;
 
-    const axiVersion = detectAxiVersion(pack, join(dir, "version-probe"));
+    const axiVersion = detectAxiVersion(pack, join(dir, "version-probe"), opts.auth);
     insertRun(db, {
       id: runId,
       pack_name: pack.name,
       pack_dir: pack.dir,
       pack_version: pack.version,
       axi_version: axiVersion,
-      config_json: JSON.stringify({ ...opts, tasks: opts.tasks.map((t) => t.id), scoring: pack.scoring }),
+      config_json: JSON.stringify({
+        ...opts,
+        auth: undefined, // never persist credentials; keep only what was used, redacted
+        config: undefined,
+        authSources: opts.auth!.sources,
+        provider: opts.auth!.provider,
+        tasks: opts.tasks.map((t) => t.id),
+        scoring: pack.scoring,
+      }),
     });
 
     const plugins = new Map(opts.arms.map((a) => [a, buildArmPlugin(pack, a, pack.arms[a], join(dir, "plugins"))]));
     for (const t of planned) insertTrial(db, { id: t.id, run_id: runId, task_id: t.task.id, arm: t.arm, model: t.model, trial_index: t.index });
     hooks.onRunStart?.(runId, planned);
+    cancelPoll = setInterval(() => {
+      if (!signal.aborted && isCancelRequested(db, runId)) {
+        hooks.onLog?.("cancel requested from the web UI — stopping in-flight trials");
+        cancel.abort();
+      }
+    }, 1000);
 
     const runOne = async (t: PlannedTrial) => {
       if (signal?.aborted) return;
@@ -146,13 +175,16 @@ export async function executeRun(db: Db, pack: Pack, opts: RunOptions, hooks: Ru
     await pool(planned.filter((t) => !serial(t)), opts.concurrency, runOne);
     await pool(planned.filter(serial), 1, runOne);
 
-    finishRun(db, runId, signal?.aborted ? "aborted" : "done");
+    if (signal.aborted) cancelQueuedTrials(db, runId);
+    finishRun(db, runId, signal.aborted ? "aborted" : "done");
     return runId;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     try { finishRun(db, runId, "failed", msg); } catch { /* run row may not exist if setup failed */ }
     throw err;
   } finally {
+    clearInterval(cancelPoll);
+    externalSignal?.removeEventListener("abort", onExternal);
     if (setupDone && pack.teardown) {
       try {
         log(`teardown: ${pack.teardown}`);
@@ -162,6 +194,12 @@ export async function executeRun(db: Db, pack: Pack, opts: RunOptions, hooks: Ru
       }
     }
   }
+}
+
+/** The model ID the session actually ran (after alias/provider resolution). */
+function initModel(messages: SDKMessage[]): string | null {
+  for (const m of messages) if (m.type === "system" && m.subtype === "init") return m.model;
+  return null;
 }
 
 function proxySummary(p: ProxyHandle) {
@@ -187,8 +225,8 @@ async function runTrial(
 ): Promise<{ outcome: TrialOutcome; grade: Grade | null }> {
   const empty: TrialOutcome = {
     status: "error", result_text: null, sdk_subtype: null, num_turns: null, tool_calls: null, tool_errors: null, error_recoveries: null,
-    escape_attempts: null, duration_ms: null, duration_api_ms: null, tokens_total: null, tokens_weighted: null, tokens_json: null,
-    cost_usd: null, error: null, network: null, fixture_misses: null, proxy_json: null,
+    escape_attempts: null, duration_ms: null, duration_api_ms: null, tokens_total: null, tokens_weighted: null, tool_tokens: null, tokens_json: null,
+    cost_usd: null, error: null, network: null, model_id: null, fixture_misses: null, proxy_json: null,
   };
   const network = taskNetwork(pack, t.task, opts);
   const scriptEnv = { ...arenaVars, ARENA_TRIAL_ID: t.id, ARENA_ARM: t.arm, ARENA_MODEL: t.model, ARENA_TRIAL_DIR: trialDir };
@@ -207,8 +245,11 @@ async function runTrial(
   if (network !== "live") {
     try {
       const ca = ensureCa();
-      proxy = await startProxy({ mode: network, store: new FixtureStore(fixtureDir(pack, t.task.id)), ca });
-      extraEnv = proxyEnv(proxy, ca);
+      proxy = await startProxy({
+        mode: network, store: new FixtureStore(fixtureDir(pack, t.task.id)), ca,
+        upstreamProxy: opts.auth?.upstreamProxy, noProxy: opts.auth?.noProxy,
+      });
+      extraEnv = proxyEnv(proxy, ca, opts.auth?.extraCaFile);
     } catch (e) {
       return { outcome: { ...empty, network, status: "setup_error", error: `replay proxy: ${e instanceof Error ? e.message : e}` }, grade: null };
     }
@@ -225,8 +266,8 @@ async function runTrial(
   let error: string | null = null;
   try {
     const options = buildQueryOptions({
-      pack, armName: t.arm, plugin, trialDir, model: t.model, effort: opts.effort,
-      maxTurns: opts.maxTurns, abortController, denials, extraEnv,
+      pack, armName: t.arm, plugin, trialDir, model: resolveModel(t.model, opts.config!), effort: opts.effort,
+      maxTurns: opts.maxTurns, abortController, denials, extraEnv, auth: opts.auth,
     });
     let seq = 0;
     for await (const msg of query({ prompt: t.task.prompt, options })) {
@@ -243,10 +284,12 @@ async function runTrial(
   }
 
   const m = computeMetrics(messages, denials);
+  const cancelled = Boolean(signal?.aborted) && !timedOut;
   // Grade before `after`, so script checks can inspect real-system state the trial left behind.
-  const grade = await gradeTrial(
+  // A cancelled trial isn't graded: no judge spend on a transcript that was cut short.
+  const grade = cancelled ? null : await gradeTrial(
     t.task, messages, m, { trialDir, arm: t.arm, model: t.model },
-    { judgeModel: opts.judgeModel, useJudge: opts.useJudge }, scriptRunner(pack, t.task),
+    { judgeModel: resolveModel(opts.judgeModel, opts.config!), useJudge: opts.useJudge, auth: opts.auth }, scriptRunner(pack, t.task),
   );
 
   if (t.task.after) {
@@ -254,7 +297,8 @@ async function runTrial(
   }
 
   const status =
-    timedOut ? "timeout"
+    cancelled ? "cancelled"
+    : timedOut ? "timeout"
     : m.sdkSubtype === "success" ? "success"
     : m.sdkSubtype === "error_max_turns" ? "max_turns"
     : "error";
@@ -271,10 +315,12 @@ async function runTrial(
     duration_api_ms: m.durationApiMs,
     tokens_total: m.tokensTotal,
     tokens_weighted: m.tokensWeighted,
+    tool_tokens: m.toolTokens,
     tokens_json: JSON.stringify(m.tokensByModel),
     cost_usd: m.costUsd,
     error: timedOut ? `timed out after ${opts.timeoutS}s` : error,
     network,
+    model_id: initModel(messages),
     fixture_misses: proxy ? proxy.misses().length : null,
     proxy_json: proxy ? JSON.stringify(proxySummary(proxy)) : null,
   };

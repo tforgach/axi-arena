@@ -4,7 +4,20 @@ import { median } from "./stats.ts";
 export interface ScoringConfig {
   weights: { tokens: number; turns: number; time: number; errors: number };
   gate: { min_correctness: number; max_regression: number };
+  /**
+   * Reward for correctness beyond the baseline's (and a small penalty for a regression inside
+   * the gate's tolerance): score += weight × (axi − baseline correctness). Older runs stored
+   * no value; they get the default.
+   */
+  correctness_weight?: number;
+  /**
+   * Which token count the efficiency score uses: "session" (everything the session cost,
+   * cost-weighted) or "tool" (only what tool calls added, plus side models). Default "session".
+   */
+  token_metric?: "session" | "tool";
 }
+
+export const DEFAULT_CORRECTNESS_WEIGHT = 1;
 
 export interface ScoredTrial {
   task_id: string;
@@ -13,6 +26,7 @@ export interface ScoredTrial {
   status: string;
   correctness: number | null;
   tokens_weighted: number | null;
+  tool_tokens?: number | null;
   num_turns: number | null;
   duration_ms: number | null;
   tool_errors: number | null;
@@ -26,7 +40,10 @@ export type Metric = (typeof METRICS)[number];
 export interface ArmSummary {
   n: number;
   correctness: number;
+  /** The token count the score uses (see ScoringConfig.token_metric). */
   tokens: number;
+  sessionTokens: number;
+  toolTokens: number;
   turns: number;
   time: number;
   errors: number;
@@ -35,6 +52,8 @@ export interface ArmSummary {
 export interface MatchScore {
   score: number;
   efficiency: number;
+  /** correctness_weight × (axi − baseline correctness); included in `score` when the gate passes. */
+  correctnessBonus: number;
   r: Record<Metric, number>;
   gatePassed: boolean;
 }
@@ -68,15 +87,18 @@ const clamp = (x: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, x
 const mean = (xs: number[]) => (xs.length ? xs.reduce((a, b) => a + b, 0) / xs.length : 0);
 
 /** Trials that count: finished with a correctness value; setup errors are nobody's fault. */
-const scorable = (t: ScoredTrial) => t.status !== "setup_error" && t.status !== "queued" && t.status !== "running" && t.correctness != null;
+const scorable = (t: ScoredTrial) =>
+  !["setup_error", "queued", "running", "cancelled"].includes(t.status) && t.correctness != null;
 
-export function summarize(trials: ScoredTrial[]): ArmSummary {
+export function summarize(trials: ScoredTrial[], tokenMetric: "session" | "tool" = "session"): ArmSummary {
   const med = (f: (t: ScoredTrial) => number | null) => median(trials.map(f).filter((x): x is number => x != null)) ?? 0;
   return {
     n: trials.length,
     // Correctness is a rate, so it's averaged; efficiency metrics use medians.
     correctness: mean(trials.map((t) => t.correctness ?? 0)),
-    tokens: med((t) => t.tokens_weighted),
+    tokens: med((t) => (tokenMetric === "tool" ? (t.tool_tokens ?? null) : t.tokens_weighted)),
+    sessionTokens: med((t) => t.tokens_weighted),
+    toolTokens: med((t) => t.tool_tokens ?? null),
     turns: med((t) => t.num_turns),
     time: med((t) => t.duration_ms),
     // Scored errors: escapes + errors the agent had to recover from (falls back to raw errors for old rows).
@@ -98,8 +120,9 @@ export function scoreMatch(axi: ArmSummary, base: ArmSummary, cfg: ScoringConfig
   const efficiency = (w.tokens * r.tokens + w.turns * r.turns + w.time * r.time + w.errors * r.errors) / wsum;
   const gatePassed =
     axi.correctness >= cfg.gate.min_correctness && axi.correctness >= base.correctness - cfg.gate.max_regression;
-  const score = gatePassed ? efficiency : Math.min(0, efficiency) - Math.max(0, base.correctness - axi.correctness);
-  return { score, efficiency, r, gatePassed };
+  const correctnessBonus = (cfg.correctness_weight ?? DEFAULT_CORRECTNESS_WEIGHT) * (axi.correctness - base.correctness);
+  const score = gatePassed ? efficiency + correctnessBonus : Math.min(0, efficiency) - Math.max(0, base.correctness - axi.correctness);
+  return { score, efficiency, correctnessBonus, r, gatePassed };
 }
 
 /** Small seeded PRNG so CIs are reproducible for a given set of trials. */
@@ -138,7 +161,8 @@ export function computeScoreboard(trials: ScoredTrial[], cfg: ScoringConfig, ite
     }
   }
 
-  const point = groups.map((g) => ({ g, s: scoreMatch(summarize(g.axi), summarize(g.base), cfg) }));
+  const tm = cfg.token_metric ?? "session";
+  const point = groups.map((g) => ({ g, s: scoreMatch(summarize(g.axi, tm), summarize(g.base, tm), cfg) }));
 
   // Bootstrap: resample trials within each arm of every match, jointly, so aggregates get CIs too.
   const rand = mulberry32(seed);
@@ -148,7 +172,7 @@ export function computeScoreboard(trials: ScoredTrial[], cfg: ScoringConfig, ite
   if (groups.some(canBootstrap)) {
     for (let i = 0; i < iterations; i++) {
       groups.forEach((g, gi) => {
-        draws[gi].push(canBootstrap(g) ? scoreMatch(summarize(resample(g.axi)), summarize(resample(g.base)), cfg).score : point[gi].s.score);
+        draws[gi].push(canBootstrap(g) ? scoreMatch(summarize(resample(g.axi), tm), summarize(resample(g.base), tm), cfg).score : point[gi].s.score);
       });
     }
   }
@@ -161,7 +185,7 @@ export function computeScoreboard(trials: ScoredTrial[], cfg: ScoringConfig, ite
 
   const matches: Match[] = point.map(({ g, s }, gi) => {
     const ci = canBootstrap(g) ? ciOf(draws[gi]) : null;
-    return { task: g.task, model: g.model, baseline: g.baseline, axi: summarize(g.axi), base: summarize(g.base), ...s, ci, significant: sig(ci) };
+    return { task: g.task, model: g.model, baseline: g.baseline, axi: summarize(g.axi, tm), base: summarize(g.base, tm), ...s, ci, significant: sig(ci) };
   });
 
   const aggregate = (key: string, idx: number[]): Aggregate => {

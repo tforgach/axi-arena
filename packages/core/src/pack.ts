@@ -2,7 +2,7 @@ import { readFileSync, readdirSync, existsSync, statSync } from "node:fs";
 import { join, resolve, isAbsolute } from "node:path";
 import { parse as parseYaml } from "yaml";
 import { z } from "zod";
-import { DEFAULT_HARMLESS_COMMANDS } from "./bashGuard.ts";
+import { DEFAULT_HARMLESS_COMMANDS, DEFAULT_PIPE_FILTERS } from "./bashGuard.ts";
 
 const HookEvent = z.enum(["SessionStart", "PreToolUse", "PostToolUse", "Stop", "UserPromptSubmit"]);
 
@@ -15,6 +15,12 @@ export const ArmSchema = z.object({
   deny: z.array(z.string()).default([]),
   /** Skill directories (each containing SKILL.md), relative to the pack. */
   skills: z.array(z.string()).default([]),
+  /**
+   * How skills reach the agent: `invoke` (listed; the agent spends a turn loading one, as in a
+   * stock Claude Code install) or `preload` (SKILL.md bodies appended to the system prompt, like
+   * a CLAUDE.md or an ambient hook). Their tokens count against the arm either way.
+   */
+  skill_delivery: z.enum(["invoke", "preload"]).default("invoke"),
   /** Hook scripts, relative to the pack. Their output counts against this arm. */
   hooks: z.partialRecord(HookEvent, z.string()).default({}),
   /** MCP servers passed straight to the SDK. */
@@ -64,6 +70,8 @@ export const ManifestSchema = z.object({
   sequential: z.boolean().default(false),
   /** Commands allowed inside chained Bash commands in every arm (never counted as escapes). */
   harmless_commands: z.array(z.string()).default(DEFAULT_HARMLESS_COMMANDS),
+  /** Text filters allowed downstream of an allowed command in a pipe (e.g. `| head`, `| jq`). */
+  pipe_filters: z.array(z.string()).default(DEFAULT_PIPE_FILTERS),
   defaults: z
     .object({
       trials: z.number().int().positive().default(3),
@@ -83,6 +91,10 @@ export const ManifestSchema = z.object({
       gate: z
         .object({ min_correctness: z.number(), max_regression: z.number() })
         .default({ min_correctness: 0.8, max_regression: 0.05 }),
+      /** Score += weight × (axi − baseline correctness) when the gate passes (0 disables the reward). */
+      correctness_weight: z.number().min(0).default(1),
+      /** Token count the efficiency score uses: whole-session (default) or only what tools added. */
+      token_metric: z.enum(["session", "tool"]).default("session"),
     })
     .prefault({}),
   arms: z.record(z.string(), ArmSchema).refine((a) => "axi" in a, "arms must include an `axi` arm").refine(

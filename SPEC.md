@@ -76,12 +76,14 @@ A match is the same task, same model, same system prompt and same inputs for bot
 The AXI arm can **only** call its AXI commands, and baseline arms can only call their native tools.
 
 Note: `allowedTools` in the SDK only *auto-approves* tools. It does **not** restrict them. Lockdown therefore takes three layers:
-1. **Same tool definitions in every arm.** `tools` is the union of every arm's tools (plus their MCP servers), plus `Skill` if any arm ships skills, plus the common tools. No arm gets a cheaper context just because it carries fewer tool descriptions. *(Decided after M1: Bash's large description gave the AXI arm about 11.3k tokens of starting context against about 7.6k for WebFetch.)*
+1. **Same built-in tool definitions in every arm.** `tools` is the union of every arm's built-in tools, plus `Skill` if any arm ships skills, plus the common tools. No arm gets a cheaper context just because it carries fewer built-in tool descriptions. *(Decided after M1: Bash's large description gave the AXI arm about 11.3k tokens of starting context against about 7.6k for WebFetch.)*
+   - **MCP servers are per arm, not shared.** Replacing an MCP server with an AXI means its tool schemas leave the context, which is often the AXI's biggest saving. Sharing them charged the AXI arm for the baseline's schemas. *(Changed after work testing: proven AXIs scored badly against MCP baselines.)*
 2. **Only permissions differ.** `allowedTools` holds just this arm's rules (e.g. `Bash(axi-fetch:*)`), with `permissionMode: 'dontAsk'`, so anything that doesn't match is denied instead of prompting. Calling a tool that's defined but not permitted counts as an escape.
    - **Common tool `Read`** is in every arm, limited to the trial's own saved-output folder. *(Decided after M1: Claude Code saves large tool outputs to a file, and without `Read` the agent can't open it.)*
 3. **The lockdown hook is the single source of truth for Bash.** It parses chained commands (`;`, `&&`, `|`; any `$(…)`, subshell or heredoc is refused) and requires every segment to be either an allowed program or a **harmless command**. It then explicitly allows the call, so Claude Code's static rules can't deny e.g. `cd <dir> && axi-fetch …`. Anything else is denied and logged as an escape.
    - **What counts as an escape:** reaching for an *equivalent* of the AXI (curl, WebFetch, python, …). Stumbling while trying to use the AXI itself doesn't count. *(Decided after M4.)*
-   - **Harmless commands** (`harmless_commands`, default `cd pwd echo printf true false which type`) are allowed in every arm. The list is minimal on purpose: for some AXIs `ls`, `cat` or `grep` *are* the equivalent. A pack can extend it, or empty it.
+   - **Harmless commands** (`harmless_commands`) are allowed anywhere in every arm: `cd pwd echo printf true false which type test [ sleep date export unset ls mkdir basename dirname`. Commands that run *other* commands (`xargs`, `env`, `command`, `sh`, `eval`) are never harmless, since they would launder an escape.
+   - **Pipe filters** (`pipe_filters`: `head tail grep sed awk cut tr sort uniq wc jq yq cat less column tee …`) are allowed **downstream of an allowed or harmless command in a pipe** (`axi-fetch url | head -50`). There they only see that command's output. Standalone, file readers stay denied, because for some AXIs reading files *is* the equivalent. `curl … | head` is still an escape, because a pipe doesn't launder its source. *(Widened after work testing.)*
    - **Calling the AXI by path** (`/…/.bin/axi-fetch url`, `./axi-fetch`) is matched by program name, so it's the AXI, not an escape. If the path doesn't exist, that's an ordinary tool error.
 4. The AXI arm also gets the `Skill` tool, so the agent can read the AXI's skill. That call is part of the AXI's real cost and counts toward its turns and tokens.
 
@@ -89,7 +91,32 @@ Note: `allowedTools` in the SDK only *auto-approves* tools. It does **not** rest
 
 Denied calls are recorded (`permission_denials` plus the hook log) and reported as **escape attempts**. They count as errors in scoring.
 
-### 4.4 Auth (decided: try SDK on subscription, fall back to CLI)
+### 4.4 Auth, providers and preflight
+
+**Credentials.** Trials never load the user's Claude settings wholesale; only the auth and provider parts are imported, so work setups authenticate as they do in Claude Code:
+- **From your shell:** `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_BASE_URL`/`_CUSTOM_HEADERS` (gateways), `CLAUDE_CODE_USE_BEDROCK|VERTEX|FOUNDRY` and their skip-auth flags, `AWS_*`, `VERTEX_REGION_*`, `CLOUD_ML_REGION`, `GOOGLE_APPLICATION_CREDENTIALS`, `ANTHROPIC_DEFAULT_*_MODEL`, `ANTHROPIC_SMALL_FAST_MODEL`, and extra names listed in `auth.env_passthrough`.
+- **From `~/.claude/settings.json`** (`auth.import_claude_settings`, on by default): `apiKeyHelper`, `awsAuthRefresh`, `awsCredentialExport`, `gcpAuthRefresh`, `proxyAuthHelper`, `modelOverrides`, and the auth/provider keys of its `env` block. These are passed as SDK flag settings. Endpoint-managed policy always applies anyway.
+- **From `~/.axi-arena/config.yaml`:** `auth.api_key_helper`, `auth.env`.
+- **Corporate network:** a shell `HTTPS_PROXY` becomes the replay proxy's upstream (passthrough tunnels and recording go through it, honoring `NO_PROXY`, with proxy credentials never printed), and `NODE_EXTRA_CA_CERTS` is merged with the replay CA.
+- The run config stores only *which* sources were used (names, never values).
+
+**Preflight.** Before a run (and via `axi-arena preflight`), each distinct model, including the judge, gets one tiny call with the exact trial auth. Failures abort before anything is spent: not logged in, invalid key, no model access, provider mapping. `--skip-preflight` opts out.
+
+**Models.** `models.aliases` in the config maps friendly names to IDs; anything else passes through, so Claude Code's own aliases (`sonnet`, `haiku`, `opus`) and its per-provider resolution still apply. `models.providers.<bedrock|vertex|foundry>` supplies `modelOverrides` for the active provider (e.g. Bedrock inference-profile ARNs). Each trial stores both the requested name (for grouping) and `model_id`, the model the session actually ran.
+
+```yaml
+# ~/.axi-arena/config.yaml
+auth:
+  api_key_helper: ~/bin/anthropic-key.sh
+  env: { CLAUDE_CODE_USE_BEDROCK: "1", AWS_PROFILE: work, AWS_REGION: us-east-1 }
+models:
+  aliases: { fast: claude-haiku-4-5 }
+  providers:
+    bedrock: { claude-sonnet-5-5: "<your Bedrock inference profile ID/ARN>" }
+packs: { jira: ~/work/arena-packs/jira }
+```
+
+#### Original auth decision (M0)
 - Runs use the user's **Claude subscription**. We try the `sdk` backend on it first, and if that fails or isn't allowed, fall back to the `cli` backend. M0 confirms which one.
 - The Agent SDK docs state: *"Unless previously approved, Anthropic does not allow third party developers to offer claude.ai login or rate limits for their products, including agents built on the Claude Agent SDK. Use the API key authentication methods…"* This is aimed at products offered to others. Whether it covers a personal local tool that uses your own login isn't clear, so **confirm this before M1.**
 - Design: auth is whatever the runner backend resolves. `ANTHROPIC_API_KEY` is still supported. The `cli` backend (plain Claude Code in headless mode) is the fallback on the subscription path.
@@ -188,7 +215,8 @@ after:  scripts/cleanup.sh
 | Metric | Source |
 |---|---|
 | `correctness` ∈ [0,1] | LLM judge (§6.2) |
-| `tokens_weighted` **(scored)** | Cost-weighted input-token equivalents, summed over every model in `modelUsage`: input ×1, cache write ×1.25, cache read ×0.1, output ×5. These are ratios to the model's own input price and hold for all current models. Models are not scaled by their absolute price. *(Decided after M1: cache reads made up most of the plain sum.)* |
+| `tool_tokens` | **What the tools put into play**: measured context each tool call added (next prompt growth), plus side-model tokens (e.g. WebFetch's summarizer, found as the usage the main loop doesn't account for, including dated same-family model entries). Excludes the fixed session overhead that dilutes session-level percentages. `scoring.token_metric: tool` scores on it. |
+| `tokens_weighted` **(scored by default)** | Cost-weighted input-token equivalents, summed over every model in `modelUsage`: input ×1, cache write ×1.25, cache read ×0.1, output ×5. These are ratios to the model's own input price and hold for all current models. Models are not scaled by their absolute price. *(Decided after M1: cache reads made up most of the plain sum.)* |
 | `tokens_total` | Plain sum over `modelUsage` of input + cache_creation + cache_read + output. **Includes side-model calls**, e.g. WebFetch's internal summarizer. *(M0: confirmed. On a Sonnet trial, WebFetch's summarizer shows up as a separate `claude-haiku-4-5` entry.)* |
 | `tokens_breakdown` | Per model and per kind (input/output/cache), plus estimated **tool-output tokens**: the tokens tool results added to context. This is the AXI's direct lever. |
 | `turns` | `num_turns` |
@@ -212,7 +240,8 @@ For each (task, model, baseline):
 2. Relative improvement per efficiency metric, where higher is better for the AXI:
    `r_m = clamp((baseline_m − axi_m) / baseline_m, −1, 1)` for m ∈ {tokens (= `tokens_weighted`), turns, time, errors}. Errors include escape attempts. If `errors` is 0 on both sides, r = 0.
 3. `efficiency = Σ w_m · r_m` using the pack's weights (default tokens 0.4, turns 0.2, time 0.2, errors 0.2).
-4. **Correctness gate:**
+4. **Correctness reward:** when the gate passes, `score = efficiency + correctness_weight × (axi − baseline correctness)` (default weight 1; 0 disables). Being more correct than native is rewarded, and a regression inside the tolerance costs a little. *(Added after work testing: correctness was a gate but never a reward.)*
+5. **Correctness gate:**
    - If `axi_correctness < min_correctness`, or `axi_correctness < baseline_correctness − max_regression`, the match **fails the gate**. Its score is `min(0, efficiency) − (baseline_correctness − axi_correctness)`, and it's marked ✗.
    - Otherwise `score = efficiency`.
 5. Display `Arena Score = 100 × score`. **0 means parity with native**, +40 means 40% better on weighted efficiency with correctness intact, and negative means worse. Scores run from −200 to +100; below −100 only happens when a match fails the gate.
@@ -263,7 +292,8 @@ axi-arena validate <pack>                   # schema + check scripts + arm lockd
 axi-arena estimate <pack> [...run flags]    # trial count + token estimate, no execution
 axi-arena serve [--port 4477]               # start web app (run also auto-starts it)
 axi-arena list [runs|packs]
-axi-arena rescore <run-id> [--judge-model id] [--no-judge]  # re-grade from stored transcripts using the pack's *current* task definitions; script checks reuse their original results
+axi-arena preflight [--models a,b]          # credentials + model access, nothing else
+axi-arena rescore <run-id> [--judge-model id] [--no-judge] [--metrics-only]  # re-grade from stored transcripts using the pack's *current* task definitions; script checks reuse their original results
 ```
 
 `run` prints a link to the live run view right away if `axi-arena serve` is running (otherwise it says to start it), and a scoreboard at the end. The server is a separate long-lived process rather than started by `run`, so the page doesn't disappear when a run ends. *(Decided in M3.)*
@@ -306,7 +336,8 @@ Charts use hand-written SVG with the dataviz reference palette, validated for li
 | **M1** ✅ | Runner + CLI + SQLite (done 2026-09-29) | `axi-arena run packs/axi-fetch` runs isolated trials for both arms and stores metrics. |
 | **M2** ✅ | Checks + judge + scoring (done 2026-09-29) | Correctness, Arena Score and CIs in the CLI summary; `rescore` works. |
 | **M3** ✅ | Web app (done 2026-09-29) | Runs, run overview, match detail, live transcripts. |
-| **M4** ✅ | Replay (done 2026-09-29) | Record/replay proxy, synthetic fixtures, fixture-miss detection. |
+| **M4** ✅ | Replay (done 2026-09-29) |
+| **M4.5** ✅ | Work-testing feedback (2026-09-30): credential import + apiKeyHelper, preflight, model aliases/provider overrides, pipe-aware lockdown, correctness reward, cancel from UI, per-arm MCP, `skill_delivery: preload`, tool-token metric | Record/replay proxy, synthetic fixtures, fixture-miss detection. |
 | **M5** | Matrix + history + side effects | Multiple models per run, pack history view, `sequential`, before/after hooks. Validated on one private work AXI. |
 | v2 | Later | Adoption arm (both tools available), other providers, CI mode (fail on score regression). |
 

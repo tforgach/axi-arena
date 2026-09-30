@@ -5,6 +5,7 @@ import { ciText, score } from "../format.ts";
 const STATUS_LABEL: Record<string, string> = {
   running: "running", done: "done", failed: "failed", aborted: "aborted", queued: "queued",
   success: "finished", max_turns: "max turns", timeout: "timed out", error: "error", setup_error: "setup error",
+  cancelled: "cancelled",
 };
 
 export function StatusPill({ status }: { status: string }) {

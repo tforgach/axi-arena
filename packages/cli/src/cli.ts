@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import {
-  FixtureStore, ManifestSchema, PackError, baselineArms, fixtureDir, taskNetwork, computeScoreboard, executeRun, getRun, historicalTokens, listRuns, loadPack,
+  FixtureStore, ManifestSchema, PackError, baselineArms, fixtureDir, taskNetwork,
+  configPath, loadConfig, preflight, resolveAuth, resolveModel, type ArenaConfig, type AuthSetup, computeScoreboard, executeRun, getRun, historicalTokens, listRuns, loadPack,
   median, openDb, planTrials, rescoreRun, runTrials,
   type Db, type Effort, type Match, type Network, type Pack, type RunOptions, type ScoringConfig, type TrialRow,
 } from "@axi-arena/core";
@@ -19,8 +20,10 @@ Usage:
   axi-arena validate <pack>          Check a pack's manifest, tasks and scripts
   axi-arena list                     Recent runs
   axi-arena show <run-id> [--detail] Scoreboard for a run (--detail adds per-arm metrics)
-  axi-arena rescore <run-id>         Re-grade a run from stored transcripts (no agent re-run)
+  axi-arena rescore <run-id>         Re-grade a run from stored transcripts (no agent re-run;
+                                     --metrics-only recomputes derived metrics without judging)
   axi-arena serve [--port N]         Web app: live trials, scoreboards, history (default port ${DEFAULT_PORT})
+  axi-arena preflight [--models a,b] Check credentials + model access without running anything
 
 Run flags:
   --models a,b         Models to run (default: pack defaults.models)
@@ -32,7 +35,11 @@ Run flags:
   --effort level       low|medium|high|xhigh|max (default: pack defaults.effort)
   --network mode       replay|record|live for every task (default: per task / pack defaults.network)
   --keep               Keep trial working dirs for debugging
+  --skip-preflight     Don't check credentials/models before running
   --yes, -y            Skip the confirmation prompt
+
+Packs can be a path or a name registered under \`packs:\` in ~/.axi-arena/config.yaml, which
+also holds credentials (apiKeyHelper, provider env) and model aliases; see SPEC §4.4.
 
 Grading flags (run, rescore):
   --judge-model id     Judge model (default: pack defaults.judge_model)
@@ -51,6 +58,8 @@ const { values: flags, positionals } = parseArgs({
     effort: { type: "string" },
     "judge-model": { type: "string" },
     "no-judge": { type: "boolean", default: false },
+    "skip-preflight": { type: "boolean", default: false },
+    "metrics-only": { type: "boolean", default: false },
     detail: { type: "boolean", default: false },
     port: { type: "string" },
     network: { type: "string" },
@@ -73,8 +82,23 @@ function die(msg: string, code = 1): never {
   process.exit(code);
 }
 
+let configCache: ArenaConfig | null = null;
+function config(): ArenaConfig {
+  if (configCache) return configCache;
+  try {
+    return (configCache = loadConfig());
+  } catch (e) {
+    die(e instanceof Error ? e.message : String(e), 2);
+  }
+}
+let authCache: AuthSetup | null = null;
+const auth = () => (authCache ??= resolveAuth(config()));
+
 function requirePack(path = target): Pack {
   if (!path) die("missing <pack> path", 2);
+  // A registered pack name (config `packs:`) or a path.
+  const registered = config().packs[path];
+  if (registered && !existsSync(join(path, "arena.yaml"))) path = registered.replace(/^~(?=\/)/, process.env.HOME ?? "~");
   try {
     return loadPack(path);
   } catch (e) {
@@ -109,6 +133,8 @@ function resolveOptions(pack: Pack): RunOptions {
   if (flags.network && !NETWORKS.includes(flags.network)) die(`--network must be one of ${NETWORKS.join(", ")}`, 2);
 
   return {
+    config: config(),
+    auth: auth(),
     network: flags.network as Network | undefined,
     models: list(flags.models) ?? pack.defaults.models,
     trials: positiveInt(flags.trials, pack.defaults.trials, "trials"),
@@ -138,6 +164,8 @@ function printEstimate(pack: Pack, opts: RunOptions): void {
   console.log(`trials    ${planned.length}  (${opts.tasks.length} tasks × ${opts.arms.length} arms × ${opts.models.length} models × ${opts.trials})`);
   console.log(`effort    ${opts.effort}  ·  concurrency ${opts.concurrency}  ·  max turns ${opts.maxTurns}  ·  timeout ${opts.timeoutS}s`);
   console.log(`judge     ${opts.useJudge ? opts.judgeModel : "off (checks only)"}`);
+  const a = opts.auth ?? auth();
+  console.log(`auth      ${a.provider} · ${a.sources.join(" · ")}`);
   const modes = new Map<string, string[]>();
   for (const t of opts.tasks) {
     const n = taskNetwork(pack, t, opts);
@@ -177,7 +205,7 @@ function printDetail(trials: TrialRow[], armOrder: string[]): void {
     const k = `${t.model}\u0000${t.task_id}\u0000${t.arm}`;
     groups.set(k, [...(groups.get(k) ?? []), t]);
   }
-  const rows: string[][] = [["model", "task", "arm", "n", "correct", "w-tokens", "raw tokens", "turns", "time s", "tools", "errors", "escapes"]];
+  const rows: string[][] = [["model", "task", "arm", "n", "correct", "w-tokens", "tool tok", "raw tokens", "turns", "time s", "tools", "errors", "escapes"]];
   const keys = [...groups.keys()].sort((a, b) => {
     const [ma, ta, aa] = a.split("\u0000");
     const [mb, tb, ab] = b.split("\u0000");
@@ -192,6 +220,7 @@ function printDetail(trials: TrialRow[], armOrder: string[]): void {
       model, task, arm, String(g.length),
       graded.length ? pct(graded.reduce((s, t) => s + t.correctness!, 0) / graded.length) : "–",
       fmt(med((t) => t.tokens_weighted)),
+      fmt(med((t) => t.tool_tokens)),
       fmt(med((t) => t.tokens_total)),
       fmt(med((t) => t.num_turns), 1),
       fmt((med((t) => t.duration_ms) ?? NaN) / 1000, 1),
@@ -200,7 +229,7 @@ function printDetail(trials: TrialRow[], armOrder: string[]): void {
       fmt(med((t) => t.escape_attempts), 1),
     ]);
   }
-  printTable(rows, new Set([3, 4, 5, 6, 7, 8, 9, 10, 11]));
+  printTable(rows, new Set([3, 4, 5, 6, 7, 8, 9, 10, 11, 12]));
   console.log("medians per arm · correct = mean correctness · w-tokens = cost-weighted (scored)");
 }
 
@@ -213,12 +242,13 @@ function printScoreboard(trials: TrialRow[], scoring: ScoringConfig): void {
     !gate ? "✗ gate" : m.ci == null ? "n<2" : m.significant ? "" : "n.s.";
   const delta = (axi: number, base: number) => (base > 0 ? `${axi <= base ? "−" : "+"}${fmt(Math.abs(1 - axi / base) * 100, 0)}%` : "–");
 
-  const rows: string[][] = [["model", "task", "vs", "correct axi/base", "w-tokens", "turns", "time", "errors", "score", "95% CI", ""]];
+  const rows: string[][] = [["model", "task", "vs", "correct axi/base", "w-tokens", "tool tok", "turns", "time", "errors", "score", "95% CI", ""]];
   for (const m of board.matches as Match[]) {
     rows.push([
       m.model, m.task, m.baseline,
       `${pct(m.axi.correctness)} / ${pct(m.base.correctness)}`,
-      delta(m.axi.tokens, m.base.tokens),
+      delta(m.axi.sessionTokens, m.base.sessionTokens),
+      delta(m.axi.toolTokens, m.base.toolTokens),
       delta(m.axi.turns, m.base.turns),
       delta(m.axi.time, m.base.time),
       `${fmt(m.axi.errors, 1)} / ${fmt(m.base.errors, 1)}`,
@@ -227,8 +257,12 @@ function printScoreboard(trials: TrialRow[], scoring: ScoringConfig): void {
       verdict(m, m.gatePassed),
     ]);
   }
-  printTable(rows, new Set([3, 4, 5, 6, 7, 8]));
-  console.log("w-tokens/turns/time: AXI relative to baseline (− is better) · errors: median axi / base, incl. escapes");
+  printTable(rows, new Set([3, 4, 5, 6, 7, 8, 9]));
+  const metric = scoring.token_metric ?? "session";
+  console.log(
+    `w-tokens = whole session, cost-weighted · tool tok = what tool calls added (+ side models) · scored: ${metric === "tool" ? "tool tok" : "w-tokens"}\n` +
+      "tokens/turns/time: AXI relative to baseline (− is better) · errors: median axi / base, incl. escapes · score includes the correctness bonus",
+  );
   const missed = trials.filter((t) => (t.fixture_misses ?? 0) > 0);
   if (missed.length) {
     console.log(`⚠ ${missed.length} trial(s) hit requests with no fixture (answered 599), so those comparisons aren't fully reproducible. Fill the gaps with: axi-arena record <pack> --tasks ${[...new Set(missed.map((t) => t.task_id))].join(",")}`);
@@ -252,8 +286,28 @@ async function cmdRun(): Promise<void> {
   await runAndReport(pack, resolveOptions(pack), "Start run?");
 }
 
+async function runPreflight(models: string[]): Promise<boolean> {
+  console.log(`\npreflight (1 tiny call per model)…`);
+  const results = await preflight(models.map((m) => resolveModel(m, config())), auth());
+  for (const r of results) {
+    const via = r.apiKeySource && r.apiKeySource !== "none" ? ` via ${r.apiKeySource}` : "";
+    console.log(
+      r.ok
+        ? `  ✓ ${r.model}${r.modelId && r.modelId !== r.model ? ` → ${r.modelId}` : ""}${via}  (${(r.ms / 1000).toFixed(1)}s)`
+        : `  ✗ ${r.model}: ${r.error}`,
+    );
+  }
+  return results.every((r) => r.ok);
+}
+
 async function runAndReport(pack: Pack, opts: RunOptions, question: string): Promise<void> {
   printEstimate(pack, opts);
+  if (!flags["skip-preflight"]) {
+    const models = [...opts.models, ...(opts.useJudge ? [opts.judgeModel] : [])];
+    if (!(await runPreflight(models))) {
+      die(`preflight failed; nothing was run. Check credentials (${configPath()}, ~/.claude/settings.json) or pass --skip-preflight`, 1);
+    }
+  }
   if (!(await confirm(`\n${question}`))) die("aborted", 1);
 
   const db = openDb();
@@ -378,11 +432,13 @@ async function cmdRescore(): Promise<void> {
   const pack = requirePack(run.pack_dir);
   const judgeModel = flags["judge-model"] ?? pack.defaults.judge_model;
   const useJudge = !flags["no-judge"];
-  console.log(`rescoring ${target} with ${useJudge ? `judge ${judgeModel}` : "checks only"}\n`);
-  const n = await rescoreRun(db, pack, target!, { judgeModel, useJudge }, (row, g) => {
+  const metricsOnly = flags["metrics-only"] ?? false;
+  console.log(`rescoring ${target} ${metricsOnly ? "(metrics only, grades unchanged)" : `with ${useJudge ? `judge ${judgeModel}` : "checks only"}`}\n`);
+  const n = await rescoreRun(db, pack, target!, { judgeModel: resolveModel(judgeModel, config()), useJudge, auth: auth() }, (row, g) => {
+    if (!g) return;
     const c = g.correctness;
     console.log(`${c == null ? "?" : c >= 0.5 ? "✓" : "✗"} ${row.task_id} · ${row.arm} · ${row.model} #${row.trial_index}  correct ${c == null ? "–" : pct(c)}  (${g.judgment.source})`);
-  }, positiveInt(flags.concurrency, 4, "concurrency"));
+  }, positiveInt(flags.concurrency, 4, "concurrency"), metricsOnly);
   console.log(`\nregraded ${n} trial(s)\n`);
   printScoreboard(runTrials(db, target!), runScoring(db, target!));
 }
@@ -401,5 +457,10 @@ switch (cmd) {
   case "show": cmdShow(); break;
   case "rescore": await cmdRescore(); break;
   case "serve": await cmdServe(); break;
+  case "preflight": {
+    const models = list(flags.models) ?? ["claude-haiku-4-5"];
+    console.log(`auth: ${auth().provider} · ${auth().sources.join(" · ")}`);
+    process.exit((await runPreflight(models)) ? 0 : 1);
+  }
   default: die(`unknown command "${cmd}"\n\n${USAGE}`, 2);
 }

@@ -69,9 +69,15 @@ npm run arena -- run packs/axi-fetch --models claude-haiku-4-5 --trials 3   # in
 `run` prints a link to watch the run live. Results are stored in `~/.axi-arena/arena.db` (override
 with `AXI_ARENA_HOME`).
 
-> **Auth.** The arena uses whatever credentials the Agent SDK resolves: an `ANTHROPIC_API_KEY`, or
-> your local Claude Code login. Check Anthropic's [Agent SDK terms](https://code.claude.com/docs/en/agent-sdk/overview)
-> for what applies to your account.
+> **Auth.** Trials use the same credentials as your Claude Code, and nothing else from your setup.
+> That means an `ANTHROPIC_API_KEY`, gateway tokens, Bedrock/Vertex/Foundry env, and the credential
+> helpers (`apiKeyHelper`, AWS/GCP refresh) plus `modelOverrides` from `~/.claude/settings.json`.
+> You can add or override them, set model aliases and register packs by name in
+> `~/.axi-arena/config.yaml`. A corporate `HTTPS_PROXY` and CA are supported. Every run starts with a
+> **preflight** (one tiny call per model) so bad credentials fail before anything is spent. Try it
+> alone with `npm run arena -- preflight --models sonnet,haiku`. See [SPEC.md §4.4](SPEC.md). Check
+> Anthropic's [Agent SDK terms](https://code.claude.com/docs/en/agent-sdk/overview) for what applies
+> to your account.
 
 ## CLI
 
@@ -82,8 +88,9 @@ axi-arena estimate <pack>   Trial count + token estimate from previous runs, wit
 axi-arena validate <pack>   Check manifest, tasks, scripts, skills and fixtures
 axi-arena list              Recent runs
 axi-arena show <run-id>     Scoreboard for a run (--detail for per-arm medians)
-axi-arena rescore <run-id>  Re-grade from stored transcripts; no agents re-run
-axi-arena serve             Web app on 127.0.0.1
+axi-arena rescore <run-id>  Re-grade from stored transcripts; no agents re-run (--metrics-only: no judging)
+axi-arena preflight         Check credentials and model access without running anything
+axi-arena serve             Web app on 127.0.0.1 (live runs, with a Cancel button)
 
 Run flags: --models a,b  --trials N  --tasks 'glob'  --tags t  --arms axi,x  --concurrency N
            --effort low|medium|high|xhigh|max  --network replay|record|live
@@ -146,6 +153,10 @@ judge:
   rubric: Correct if it says the flag was added in 4.7.0 and defaults to false.
 ```
 
+Arms can deliver their skill with `skill_delivery: preload` (in the system prompt, like a
+CLAUDE.md) instead of the default `invoke` (the agent spends a turn loading it), or use a
+`SessionStart` hook for ambient usage.
+
 Stateful AXIs (tickets, databases, …) can use `setup`/`teardown`, per-task `before`/`after`, and
 `script` checks that inspect the real system. `sequential: true` stops those trials from running
 in parallel.
@@ -157,11 +168,19 @@ The arena spends most of its effort on keeping the comparison honest:
 - **Clean sessions.** Your `~/.claude` settings, CLAUDE.md, skills, MCP servers and claude.ai
   connectors are not loaded. Each trial has its own working directory and its own cache and config
   directories, so an AXI's disk cache can't carry over between trials.
-- **Tool parity.** Every arm carries the same tool definitions; only the permissions differ. No arm
-  gets a cheaper context just by having fewer tool descriptions.
+- **Tool parity.** Every arm carries the same built-in tool definitions; only the permissions differ.
+  MCP servers are per arm, so an AXI that replaces an MCP server isn't charged for its schemas.
 - **What counts as an escape.** An escape is reaching for an *equivalent* tool (`curl`, `WebFetch`,
-  `python`, …). Harmless helpers (`cd`, `echo`, `which`, …) and calling the AXI by its path are
-  allowed. The lockdown parses chained commands, so `axi-fetch x; curl y` doesn't slip through.
+  `python`, …). These are all allowed: harmless helpers (`cd`, `ls`, `echo`, `which`, …), text
+  filters *after* the AXI in a pipe (`axi-fetch url | head -50`, `| jq .`), and calling the AXI by
+  its path. The lockdown parses chained commands, so `axi-fetch x; curl y` and `curl … | head`
+  don't slip through.
+- **Two token views.** *Session* tokens (cost-weighted, everything the session cost) and *tool*
+  tokens (only what tool calls added, plus side models such as WebFetch's summarizer). Fixed session
+  overhead (~9–12k tokens of system prompt and tool definitions) dilutes session-level percentages:
+  axi-fetch's −61% session saving on a docs page is −95% in tool tokens. Packs choose which one is
+  scored with `scoring.token_metric`.
+- **Correctness is rewarded, not just gated.** Being more correct than native adds to the score.
 - **Hidden costs are counted.** Tokens are summed over every model a trial used, so WebFetch's
   internal summarizer counts too. Scored tokens are cost-weighted (cache reads ×0.1, writes ×1.25,
   output ×5).

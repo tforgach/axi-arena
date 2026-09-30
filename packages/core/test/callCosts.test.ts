@@ -32,6 +32,32 @@ test("measures each call's cost as the growth of the next prompt; splits paralle
   assert.equal(c.calls.b.sideTokens, 0);
 });
 
+test("same-model side calls are recovered from the usage residual (e.g. WebFetch summarizer on the trial model)", () => {
+  const msgs = [
+    { type: "system", subtype: "init", model: "claude-haiku-4-5" },
+    asst("m1", 10_000, [{ type: "tool_use", id: "w", name: "WebFetch", input: { url: "u" } }]),
+    result("w", "short summary"),
+    asst("m2", 10_400, [{ type: "text", text: "done" }]),
+    // Main loop input = 20,400; the model's total input is 38,400 → 18,000 went to the summarizer.
+    { type: "result", modelUsage: { "claude-haiku-4-5": { inputTokens: 18_010, cacheReadInputTokens: 20_390, cacheCreationInputTokens: 0, outputTokens: 50 } } },
+  ] as unknown as SDKMessage[];
+  assert.equal(callCosts(msgs).calls.w!.sideTokens, 18_000);
+});
+
+test("a dated variant of the session model is a separate side call (how WebFetch's summarizer is reported)", () => {
+  const msgs = [
+    { type: "system", subtype: "init", model: "claude-haiku-4-5" },
+    asst("m1", 11_522, [{ type: "tool_use", id: "w", name: "WebFetch", input: { url: "u" } }]),
+    result("w", "summary"),
+    asst("m2", 12_077, [{ type: "text", text: "done" }]),
+    { type: "result", modelUsage: {
+      "claude-haiku-4-5": { inputTokens: 17, cacheReadInputTokens: 18_264, cacheCreationInputTokens: 5_318, outputTokens: 310 },
+      "claude-haiku-4-5-20251001": { inputTokens: 17_679, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, outputTokens: 332 },
+    } },
+  ] as unknown as SDKMessage[];
+  assert.equal(callCosts(msgs).calls.w!.sideTokens, 17_679 + 332);
+});
+
 test("the last call before a stream ends has no measurement yet", () => {
   const c = callCosts([asst("m1", 5_000, [{ type: "tool_use", id: "a", name: "Read", input: {} }]), result("a", "x")] as unknown as SDKMessage[]);
   assert.equal(c.calls.a.contextTokens, null);

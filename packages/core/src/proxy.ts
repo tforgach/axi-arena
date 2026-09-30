@@ -1,6 +1,9 @@
 // Per-trial record/replay proxy (SPEC §7). Infrastructure hosts (Anthropic API, Claude Code's
 // own services) are tunneled untouched; every other host is intercepted with a local-CA cert
 // and served from the task's fixtures (replay), or fetched and saved when missing (record).
+import { createHash } from "node:crypto";
+import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import http from "node:http";
 import https from "node:https";
 import net from "node:net";
@@ -46,6 +49,49 @@ export interface ProxyOptions {
   passthrough?: string[];
   /** Upstream timeout when recording. */
   timeoutMs?: number;
+  /** Corporate egress proxy to chain through (passthrough tunnels and recording). */
+  upstreamProxy?: string | null;
+  /** Hosts that bypass the upstream proxy (NO_PROXY semantics: suffix match, `*` = all). */
+  noProxy?: string[];
+}
+
+const bypassUpstream = (host: string, noProxy: string[] = []) =>
+  noProxy.some((n) => n === "*" || host === n.replace(/^\./, "") || host.endsWith(n.startsWith(".") ? n : `.${n}`));
+
+/**
+ * A raw TCP path to host:port: direct, or a CONNECT tunnel through the upstream proxy
+ * (with Basic proxy auth if the proxy URL carries credentials).
+ */
+export function openTunnel(host: string, port: number, upstream?: string | null, noProxy?: string[]): Promise<net.Socket> {
+  if (!upstream || bypassUpstream(host, noProxy)) {
+    return new Promise((resolve, reject) => {
+      const s = net.connect(port, host, () => resolve(s));
+      s.once("error", reject);
+    });
+  }
+  const up = new URL(upstream);
+  const auth = up.username
+    ? `Proxy-Authorization: Basic ${Buffer.from(`${decodeURIComponent(up.username)}:${decodeURIComponent(up.password)}`).toString("base64")}\r\n`
+    : "";
+  return new Promise((resolve, reject) => {
+    const s = net.connect(Number(up.port) || (up.protocol === "https:" ? 443 : 80), up.hostname, () => {
+      s.write(`CONNECT ${host}:${port} HTTP/1.1\r\nHost: ${host}:${port}\r\n${auth}\r\n`);
+    });
+    let buf = Buffer.alloc(0);
+    const onData = (chunk: Buffer) => {
+      buf = Buffer.concat([buf, chunk]);
+      const end = buf.indexOf("\r\n\r\n");
+      if (end === -1) return;
+      s.off("data", onData);
+      const status = /^HTTP\/1\.[01] (\d{3})/.exec(buf.subarray(0, end).toString("latin1"))?.[1];
+      if (status !== "200") return reject(new Error(`upstream proxy refused CONNECT ${host}:${port} (${status ?? "bad response"})`));
+      const rest = buf.subarray(end + 4);
+      if (rest.length) s.unshift(rest);
+      resolve(s);
+    };
+    s.on("data", onData);
+    s.once("error", reject);
+  });
 }
 
 const MISS_STATUS = 599;
@@ -59,12 +105,14 @@ function readBody(req: http.IncomingMessage): Promise<Buffer> {
   });
 }
 
-function fetchUpstream(
+async function fetchUpstream(
   url: URL,
   method: string,
   headers: http.IncomingHttpHeaders,
   body: Buffer,
   timeoutMs: number,
+  upstream?: string | null,
+  noProxy?: string[],
 ): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
   const lib = url.protocol === "https:" ? https : http;
   const fwd: http.OutgoingHttpHeaders = { ...headers, host: url.host };
@@ -72,13 +120,50 @@ function fetchUpstream(
   delete fwd["accept-encoding"];
   delete fwd["proxy-connection"];
   delete fwd["proxy-authorization"];
+  const port = Number(url.port) || (url.protocol === "https:" ? 443 : 80);
+  let extra: https.RequestOptions = {};
+  if (upstream && !bypassUpstream(url.hostname, noProxy)) {
+    if (url.protocol === "https:") {
+      const tunnel = await openTunnel(url.hostname, port, upstream, noProxy);
+      const secure = tls.connect({ socket: tunnel, servername: url.hostname });
+      extra = { agent: false, createConnection: () => secure };
+    } else {
+      // Plain HTTP through a proxy: absolute-form request to the proxy itself.
+      const up = new URL(upstream);
+      return fetchUpstreamPlain(up, url, method, fwd, body, timeoutMs);
+    }
+  }
   return new Promise((resolve, reject) => {
-    const req = lib.request(url, { method, headers: fwd, timeout: timeoutMs }, (res) => {
+    const req = lib.request(url, { method, headers: fwd, timeout: timeoutMs, ...extra }, (res) => {
       const chunks: Buffer[] = [];
       res.on("data", (c: Buffer) => chunks.push(c));
       res.on("end", () => resolve({ status: res.statusCode ?? 502, headers: res.headers, body: Buffer.concat(chunks) }));
       res.on("error", reject);
     });
+    req.on("timeout", () => req.destroy(new Error(`upstream timeout after ${timeoutMs}ms`)));
+    req.on("error", reject);
+    req.end(body);
+  });
+}
+
+function fetchUpstreamPlain(
+  up: URL,
+  url: URL,
+  method: string,
+  headers: http.OutgoingHttpHeaders,
+  body: Buffer,
+  timeoutMs: number,
+): Promise<{ status: number; headers: http.IncomingHttpHeaders; body: Buffer }> {
+  return new Promise((resolve, reject) => {
+    const req = http.request(
+      { host: up.hostname, port: Number(up.port) || 80, method, path: url.href, headers, timeout: timeoutMs },
+      (res) => {
+        const chunks: Buffer[] = [];
+        res.on("data", (c: Buffer) => chunks.push(c));
+        res.on("end", () => resolve({ status: res.statusCode ?? 502, headers: res.headers, body: Buffer.concat(chunks) }));
+        res.on("error", reject);
+      },
+    );
     req.on("timeout", () => req.destroy(new Error(`upstream timeout after ${timeoutMs}ms`)));
     req.on("error", reject);
     req.end(body);
@@ -106,7 +191,7 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
       return res.end(`axi-arena replay: no fixture for ${method} ${url.href}`);
     }
     try {
-      const up = await fetchUpstream(url, method, req.headers, body, timeoutMs);
+      const up = await fetchUpstream(url, method, req.headers, body, timeoutMs, opts.upstreamProxy, opts.noProxy);
       const headers = storableHeaders(up.headers);
       opts.store.save(method, url.href, body, up.status, headers, up.body);
       events.push({ kind: "recorded", method, url: url.href, status: up.status });
@@ -162,14 +247,20 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
 
     if (isPassthrough(host, opts.passthrough)) {
       events.push({ kind: "passthrough", method: "CONNECT", url: `${host}:${port}` });
-      const upstream = net.connect(port, host, () => {
-        if (head?.length) upstream.write(head);
-        upstream.pipe(client);
-        client.pipe(upstream);
-      });
-      sockets.add(upstream);
-      upstream.on("close", () => sockets.delete(upstream));
-      upstream.on("error", () => client.destroy());
+      openTunnel(host, port, opts.upstreamProxy, opts.noProxy).then(
+        (upstream) => {
+          sockets.add(upstream);
+          upstream.on("close", () => sockets.delete(upstream));
+          upstream.on("error", () => client.destroy());
+          if (head?.length) upstream.write(head);
+          upstream.pipe(client);
+          client.pipe(upstream);
+        },
+        (e) => {
+          events.push({ kind: "upstream_error", method: "CONNECT", url: `${host}:${port}`, detail: e instanceof Error ? e.message : String(e) });
+          client.destroy();
+        },
+      );
       return;
     }
 
@@ -200,8 +291,19 @@ export async function startProxy(opts: ProxyOptions): Promise<ProxyHandle> {
   };
 }
 
-/** Env that routes a trial's traffic through the proxy and trusts the local CA. */
-export function proxyEnv(proxy: ProxyHandle, ca: Ca): Record<string, string> {
+/** A file with our CA plus the user's extra CA (e.g. a corporate MITM root), content-addressed. */
+function mergedPem(ca: Ca, base: string, extraCaFile: string | null | undefined, name: string): string {
+  if (!extraCaFile || !existsSync(extraCaFile)) return base;
+  const content = `${readFileSync(base, "utf8")}\n${readFileSync(extraCaFile, "utf8")}`;
+  const file = join(ca.dir, `${name}-${createHash("sha256").update(content).digest("hex").slice(0, 12)}.pem`);
+  if (!existsSync(file)) writeFileSync(file, content);
+  return file;
+}
+
+/** Env that routes a trial's traffic through the proxy and trusts the local CA (plus any corporate CA). */
+export function proxyEnv(proxy: ProxyHandle, ca: Ca, extraCaFile?: string | null): Record<string, string> {
+  const caCerts = mergedPem(ca, ca.certPath, extraCaFile, "trust");
+  const bundle = mergedPem(ca, ca.bundlePath, extraCaFile, "bundle");
   return {
     HTTPS_PROXY: proxy.url,
     HTTP_PROXY: proxy.url,
@@ -210,10 +312,10 @@ export function proxyEnv(proxy: ProxyHandle, ca: Ca): Record<string, string> {
     NO_PROXY: "",
     no_proxy: "",
     NODE_USE_ENV_PROXY: "1",
-    NODE_EXTRA_CA_CERTS: ca.certPath,
+    NODE_EXTRA_CA_CERTS: caCerts,
     // Tools that replace (not extend) the trust store get system roots + our CA.
-    SSL_CERT_FILE: ca.bundlePath,
-    CURL_CA_BUNDLE: ca.bundlePath,
-    REQUESTS_CA_BUNDLE: ca.bundlePath,
+    SSL_CERT_FILE: bundle,
+    CURL_CA_BUNDLE: bundle,
+    REQUESTS_CA_BUNDLE: bundle,
   };
 }

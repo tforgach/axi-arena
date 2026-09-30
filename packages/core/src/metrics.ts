@@ -1,6 +1,7 @@
 // Derives per-trial metrics from the raw SDK message stream (SPEC §6.1).
 import type { SDKMessage, SDKResultMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { GuardDenial } from "./arm.ts";
+import { callCosts } from "./callCosts.ts";
 
 export interface ModelTokens {
   input: number;
@@ -33,6 +34,12 @@ export interface TrialMetrics {
   tokensTotal: number | null;
   /** The scored token metric: cost-weighted input-token equivalents across all models. */
   tokensWeighted: number | null;
+  /**
+   * Tokens the tools themselves put into play: measured context each tool call added, plus
+   * side-model tokens (e.g. WebFetch's summarizer). Excludes the fixed session overhead
+   * (system prompt, tool definitions) that dilutes relative savings in session totals.
+   */
+  toolTokens: number | null;
   tokensByModel: Record<string, ModelTokens>;
   numTurns: number | null;
   durationMs: number | null;
@@ -70,6 +77,11 @@ export function tokensByModel(result: SDKResultMessage): Record<string, ModelTok
     out[model] = t;
   }
   return out;
+}
+
+function toolTokens(messages: SDKMessage[]): number {
+  const { calls } = callCosts(messages);
+  return Object.values(calls).reduce((n, c) => n + (c.contextTokens ?? 0) + c.sideTokens, 0);
 }
 
 export function computeMetrics(messages: SDKMessage[], guardDenials: GuardDenial[]): TrialMetrics {
@@ -111,6 +123,7 @@ export function computeMetrics(messages: SDKMessage[], guardDenials: GuardDenial
     escapeAttempts: escaped.size,
     tokensTotal: result ? Object.values(byModel).reduce((s, t) => s + t.total, 0) : null,
     tokensWeighted: result ? Math.round(Object.values(byModel).reduce((s, t) => s + t.weighted, 0)) : null,
+    toolTokens: result ? toolTokens(messages) : null,
     tokensByModel: byModel,
     numTurns: result?.num_turns ?? null,
     durationMs: result?.duration_ms ?? null,

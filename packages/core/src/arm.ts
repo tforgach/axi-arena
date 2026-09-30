@@ -6,6 +6,7 @@ import type { HookCallback, Options } from "@anthropic-ai/claude-agent-sdk";
 import { bashPrefixes, checkBash } from "./bashGuard.ts";
 import { packPath, type Arm, type Effort, type Pack } from "./pack.ts";
 import { arenaHome } from "./paths.ts";
+import type { AuthSetup } from "./config.ts";
 
 export interface GuardDenial {
   toolUseId: string;
@@ -27,8 +28,18 @@ function skillName(skillDir: string): string {
  * Materialize an arm's skills and hooks as a local plugin under `outDir`.
  * Returns the plugin path and the qualified skill names, or null if the arm has neither.
  */
+/** SKILL.md bodies (frontmatter stripped) for `skill_delivery: preload`. */
+export function preloadedSkills(pack: Pack, arm: Arm): string | null {
+  if (arm.skill_delivery !== "preload" || arm.skills.length === 0) return null;
+  return arm.skills
+    .map((rel) => readFileSync(join(packPath(pack, rel), "SKILL.md"), "utf8").replace(/^---\s*\n[\s\S]*?\n---\s*\n/, "").trim())
+    .join("\n\n");
+}
+
 export function buildArmPlugin(pack: Pack, armName: string, arm: Arm, outDir: string): { path: string; skills: string[] } | null {
-  if (arm.skills.length === 0 && Object.keys(arm.hooks).length === 0) return null;
+  // Preloaded skills go in the system prompt instead of the plugin.
+  const skillDirs = arm.skill_delivery === "preload" ? [] : arm.skills;
+  if (skillDirs.length === 0 && Object.keys(arm.hooks).length === 0) return null;
   const dir = join(outDir, pluginName(armName));
   mkdirSync(join(dir, ".claude-plugin"), { recursive: true });
   writeFileSync(
@@ -37,7 +48,7 @@ export function buildArmPlugin(pack: Pack, armName: string, arm: Arm, outDir: st
   );
 
   const skills: string[] = [];
-  for (const rel of arm.skills) {
+  for (const rel of skillDirs) {
     const src = packPath(pack, rel);
     const name = skillName(src);
     cpSync(src, join(dir, "skills", name), { recursive: true });
@@ -58,7 +69,13 @@ export function buildArmPlugin(pack: Pack, armName: string, arm: Arm, outDir: st
 const SYSTEM_PATH = ["/usr/local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"];
 
 /** A minimal, explicit env. The SDK replaces process.env rather than merging it. */
-export function trialEnv(pack: Pack, arm: Arm, trialDir: string, extra: Record<string, string> = {}): Record<string, string> {
+export function trialEnv(
+  pack: Pack,
+  arm: Arm,
+  trialDir: string,
+  extra: Record<string, string> = {},
+  auth?: Pick<AuthSetup, "env">,
+): Record<string, string> {
   const path = [...arm.path.map((p) => packPath(pack, p)), dirname(process.execPath), ...SYSTEM_PATH];
   const env: Record<string, string> = {
     PATH: [...new Set(path)].join(":"),
@@ -73,10 +90,12 @@ export function trialEnv(pack: Pack, arm: Arm, trialDir: string, extra: Record<s
     XDG_STATE_HOME: join(trialDir, "xdg", "state"),
     CLAUDE_CODE_DISABLE_BUNDLED_SKILLS: "1",
     CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: "1",
+    // Credentials/provider env (API key, Bedrock/Vertex, gateway, corporate proxy + CA).
+    ...(auth?.env ?? {}),
+    // Replay proxy env wins over the corporate proxy (the replay proxy chains through it).
     ...extra,
     ...arm.env,
   };
-  if (process.env.ANTHROPIC_API_KEY) env.ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
   for (const k of ["TMPDIR", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_STATE_HOME"]) {
     mkdirSync(env[k], { recursive: true });
   }
@@ -87,17 +106,20 @@ export function trialEnv(pack: Pack, arm: Arm, trialDir: string, extra: Record<s
 export const COMMON_TOOLS = ["Read"] as const;
 
 /**
- * Tool definitions are identical across arms (the union of every arm's tools, plus
- * Skill if any arm ships skills, plus the common tools), so no arm gets a cheaper
- * context just by carrying fewer tool descriptions. Only permissions differ.
+ * Built-in tool definitions are identical across arms (the union of every arm's built-in
+ * tools, plus Skill if any arm ships skills, plus the common tools): a real Claude Code
+ * session always carries them, so no arm gets a cheaper context by carrying fewer.
+ *
+ * MCP servers are NOT shared: each arm connects only its own. Replacing an MCP server with an
+ * AXI means its tool schemas are gone from the context, and that is often the AXI's biggest
+ * saving. Sharing them charged the AXI arm for the baseline's schemas (SPEC §4.3).
  */
-export function sharedToolset(pack: Pack): { tools: string[]; mcpServers: Record<string, unknown> } {
+export function sharedToolset(pack: Pack, armName?: string): { tools: string[]; mcpServers: Record<string, unknown> } {
   const arms = Object.values(pack.arms);
   const tools = new Set<string>(COMMON_TOOLS);
   for (const a of arms) for (const t of a.tools) tools.add(t);
   if (arms.some((a) => a.skills.length > 0)) tools.add("Skill");
-  const mcpServers: Record<string, unknown> = {};
-  for (const a of arms) Object.assign(mcpServers, a.mcp_servers);
+  const mcpServers = armName ? { ...pack.arms[armName]!.mcp_servers } : {};
   return { tools: [...tools], mcpServers };
 }
 
@@ -107,7 +129,13 @@ const underDir = (p: string, dir: string) => p === dir || p.startsWith(dir + "/"
  * PreToolUse backstop: denies anything outside the arm's own permissions and records it
  * as an escape. `readRoots` are the only places the common Read tool may look.
  */
-export function lockdownHook(arm: Arm, denials: GuardDenial[], readRoots: string[] = [], harmless?: string[]): HookCallback {
+export function lockdownHook(
+  arm: Arm,
+  denials: GuardDenial[],
+  readRoots: string[] = [],
+  harmless?: string[],
+  pipeFilters?: string[],
+): HookCallback {
   const allow = bashPrefixes(arm.allow);
   const deny = bashPrefixes(arm.deny);
   const mcpPrefixes = Object.keys(arm.mcp_servers).map((s) => `mcp__${s}__`);
@@ -120,7 +148,7 @@ export function lockdownHook(arm: Arm, denials: GuardDenial[], readRoots: string
     let reason: string | null = null;
     if (tool === "Bash" && permitted.has("Bash")) {
       const cmd = String((toolInput as { command?: unknown })?.command ?? "");
-      const v = checkBash(cmd, allow, deny, harmless);
+      const v = checkBash(cmd, allow, deny, harmless, pipeFilters);
       if (!v.ok) reason = v.reason;
       // The guard is the single source of truth for Bash: approve explicitly, so Claude Code's
       // static rules don't deny e.g. `cd <dir> && axi-fetch …` or a path-qualified AXI call.
@@ -172,26 +200,32 @@ export interface QueryOptionsInput {
   abortController: AbortController;
   denials: GuardDenial[];
   extraEnv?: Record<string, string>;
+  auth?: AuthSetup;
 }
 
 export function buildQueryOptions(i: QueryOptionsInput): Options {
   const arm = i.pack.arms[i.armName];
   const cwd = trialWorkDir(i.trialDir);
   if (!existsSync(cwd)) mkdirSync(cwd, { recursive: true });
-  const shared = sharedToolset(i.pack);
+  const shared = sharedToolset(i.pack, i.armName);
   // Read is for Claude Code's saved large outputs (and the empty work dir), nothing else.
   const readRoots = [claudeProjectDir(cwd), realpathSync(cwd)];
+  const preloaded = preloadedSkills(i.pack, arm);
   const readRules = arm.tools.includes("Read") ? [] : readRoots.map((r) => `Read(/${r}/**)`);
   const allowedTools = [...arm.allow, ...readRules];
-  if (arm.skills.length > 0) allowedTools.push("Skill");
+  if (arm.skills.length > 0 && arm.skill_delivery !== "preload") allowedTools.push("Skill");
   return {
     cwd,
-    env: trialEnv(i.pack, arm, i.trialDir, i.extraEnv),
+    env: trialEnv(i.pack, arm, i.trialDir, i.extraEnv, i.auth),
+    // Only credential helpers + modelOverrides from the user's setup (never skills/MCP/CLAUDE.md).
+    ...(i.auth && Object.keys(i.auth.settings).length ? { settings: i.auth.settings } : {}),
     model: i.model,
     effort: i.effort,
     maxTurns: i.maxTurns,
     abortController: i.abortController,
-    systemPrompt: { type: "preset", preset: "claude_code" },
+    systemPrompt: preloaded
+      ? { type: "preset", preset: "claude_code", append: `\n\n${preloaded}` }
+      : { type: "preset", preset: "claude_code" },
     // Isolation from the user's own Claude setup (M0 findings).
     settingSources: [],
     strictMcpConfig: true,
@@ -205,6 +239,6 @@ export function buildQueryOptions(i: QueryOptionsInput): Options {
     allowedTools,
     disallowedTools: arm.deny,
     permissionMode: "dontAsk",
-    hooks: { PreToolUse: [{ hooks: [lockdownHook(arm, i.denials, readRoots, i.pack.harmless_commands)] }] },
+    hooks: { PreToolUse: [{ hooks: [lockdownHook(arm, i.denials, readRoots, i.pack.harmless_commands, i.pack.pipe_filters)] }] },
   };
 }

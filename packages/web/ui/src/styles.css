@@ -144,7 +144,7 @@ tr.clickable:hover td { background: var(--surface-2); }
 .pill.running .dot { background: var(--accent); animation: pulse 1.2s ease-in-out infinite; }
 .pill.done .dot, .pill.success .dot { background: var(--good); }
 .pill.failed .dot, .pill.error .dot, .pill.timeout .dot, .pill.max_turns .dot { background: var(--critical); }
-.pill.aborted .dot, .pill.setup_error .dot { background: var(--warning); }
+.pill.aborted .dot, .pill.setup_error .dot, .pill.cancelled .dot { background: var(--warning); }
 .pill.queued .dot { background: var(--axis); }
 @keyframes pulse { 50% { opacity: 0.3; } }
 @media (prefers-reduced-motion: reduce) { .pill.running .dot { animation: none; } }

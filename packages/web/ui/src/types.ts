@@ -1,6 +1,6 @@
 // Shapes returned by the API in src/server.ts (kept local so the UI doesn't pull in Node types).
 
-export type TrialStatus = "queued" | "running" | "success" | "max_turns" | "timeout" | "error" | "setup_error";
+export type TrialStatus = "queued" | "running" | "success" | "max_turns" | "timeout" | "error" | "setup_error" | "cancelled";
 
 export interface CheckResult {
   index: number;
@@ -48,6 +48,8 @@ export interface Trial {
   duration_api_ms: number | null;
   tokens_total: number | null;
   tokens_weighted: number | null;
+  tool_tokens: number | null;
+  model_id: string | null;
   cost_usd: number | null;
   correctness: number | null;
   trial_dir: string | null;
@@ -63,7 +65,10 @@ export interface Trial {
 export interface ArmSummary {
   n: number;
   correctness: number;
+  /** The token count the score uses (session or tool, per scoring.token_metric). */
   tokens: number;
+  sessionTokens: number;
+  toolTokens: number;
   turns: number;
   time: number;
   errors: number;
@@ -79,6 +84,7 @@ export interface Match {
   base: ArmSummary;
   score: number;
   efficiency: number;
+  correctnessBonus: number;
   r: Record<Metric, number>;
   gatePassed: boolean;
   ci: [number, number] | null;
@@ -103,6 +109,8 @@ export interface Scoreboard {
 export interface ScoringConfig {
   weights: Record<Metric, number>;
   gate: { min_correctness: number; max_regression: number };
+  correctness_weight?: number;
+  token_metric?: "session" | "tool";
 }
 
 export interface RunConfig {

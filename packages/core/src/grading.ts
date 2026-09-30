@@ -8,6 +8,7 @@ import type { Task } from "./pack.ts";
 export interface GradeOptions {
   judgeModel: string;
   useJudge: boolean;
+  auth?: import("./config.ts").AuthSetup;
 }
 
 export interface Grade {
@@ -30,7 +31,7 @@ export async function gradeTrial(
     runScript,
   );
   try {
-    const judgment = await judge({ task, answer: metrics.resultText, checks, messages, judgeModel: opts.judgeModel, useJudge: opts.useJudge });
+    const judgment = await judge({ task, answer: metrics.resultText, checks, messages, judgeModel: opts.judgeModel, useJudge: opts.useJudge, auth: opts.auth });
     return { correctness: judgment.correctness, checks, judgment };
   } catch (e) {
     // A judge failure leaves correctness unknown; the trial is excluded from scoring until rescored.

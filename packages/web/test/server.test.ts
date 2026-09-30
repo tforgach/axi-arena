@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { appendEvent, finishRun, finishTrial, insertRun, insertTrial, openDb, setGrade, type TrialOutcome } from "@axi-arena/core";
+import { appendEvent, finishRun, finishTrial, insertRun, insertTrial, isCancelRequested, openDb, setGrade, type TrialOutcome } from "@axi-arena/core";
 import { createApp } from "../src/server.ts";
 
 function seededApp() {
@@ -15,7 +15,7 @@ function seededApp() {
   const outcome = (tokens: number): TrialOutcome => ({
     status: "success", result_text: "answer", sdk_subtype: "success", num_turns: 2, tool_calls: 1, tool_errors: 0,
     error_recoveries: 0, escape_attempts: 0, duration_ms: 1000, duration_api_ms: 900, tokens_total: tokens,
-    tokens_weighted: tokens, tokens_json: "{}", cost_usd: 0, error: null, network: "live", fixture_misses: null, proxy_json: null,
+    tokens_weighted: tokens, tool_tokens: Math.round(tokens / 4), tokens_json: "{}", cost_usd: 0, error: null, network: "live", model_id: "m-1", fixture_misses: null, proxy_json: null,
   });
   for (const [id, arm, tokens] of [["a", "axi", 500], ["b", "native", 1000]] as const) {
     insertTrial(db, { id, run_id: "r1", task_id: "t", arm, model: "m", trial_index: 0 });
@@ -60,4 +60,17 @@ test("unknown ids 404; finished trial stream ends immediately", async () => {
   const body = await (await app.request("/api/trials/a/stream?after=-1")).text();
   assert.match(body, /event: items/);
   assert.match(body, /event: end/);
+});
+
+test("cancel: needs the arena header, only works on running runs, and sets the flag", async () => {
+  const db = openDb(join(mkdtempSync(join(tmpdir(), "arena-web-")), "arena.db"));
+  insertRun(db, { id: "live", pack_name: "demo", pack_dir: "/tmp/demo", pack_version: "0", axi_version: null, config_json: "{}" });
+  const app = createApp(db);
+  const post = (id: string, headers: Record<string, string> = { "x-axi-arena": "1" }) => app.request(`/api/runs/${id}/cancel`, { method: "POST", headers });
+  assert.equal((await post("live", {})).status, 403, "no header → refused (cross-site requests can't set it)");
+  assert.equal((await post("nope")).status, 404);
+  assert.equal((await post("live")).status, 200);
+  assert.equal(isCancelRequested(db, "live"), true);
+  finishRun(db, "live", "aborted");
+  assert.equal((await post("live")).status, 409, "not running any more");
 });

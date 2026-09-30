@@ -43,10 +43,11 @@ function ArmTrials({ title, trials }: { title: string; trials: Trial[] }) {
   );
 }
 
-function SummaryTable({ axi, base, baseline }: { axi: ArmSummary; base: ArmSummary; baseline: string }) {
+function SummaryTable({ axi, base, baseline, metric }: { axi: ArmSummary; base: ArmSummary; baseline: string; metric: "session" | "tool" }) {
   const rows: [string, string, string, string][] = [
     ["Correctness (mean)", pct(axi.correctness), pct(base.correctness), axi.correctness === base.correctness ? "=" : `${axi.correctness > base.correctness ? "+" : "−"}${num(Math.abs(axi.correctness - base.correctness) * 100)} pts`],
-    ["Tokens, cost-weighted (median)", num(axi.tokens), num(base.tokens), relDelta(axi.tokens, base.tokens)],
+    [`Session tokens, cost-weighted (median)${metric === "session" ? " · scored" : ""}`, num(axi.sessionTokens), num(base.sessionTokens), relDelta(axi.sessionTokens, base.sessionTokens)],
+    [`Tool tokens: what tool calls added, + side models (median)${metric === "tool" ? " · scored" : ""}`, num(axi.toolTokens), num(base.toolTokens), relDelta(axi.toolTokens, base.toolTokens)],
     ["Turns (median)", num(axi.turns, 1), num(base.turns, 1), relDelta(axi.turns, base.turns)],
     ["Time (median)", secs(axi.time), secs(base.time), relDelta(axi.time, base.time)],
     ["Errors + escapes (median)", num(axi.errors, 1), num(base.errors, 1), base.errors === axi.errors ? "=" : `${axi.errors > base.errors ? "+" : "−"}${num(Math.abs(axi.errors - base.errors), 1)}`],
@@ -96,7 +97,7 @@ export function MatchPage({ runId, task, model, vs }: { runId: string; task: str
           <div className="note" style={{ marginTop: 8 }}>
             Weighted efficiency {score(m.efficiency)}.{" "}
             {m.gatePassed
-              ? "Correctness gate passed, so the score is the efficiency."
+              ? `Correctness gate passed, so the score is the efficiency ${m.correctnessBonus >= 0 ? "plus" : "minus"} a correctness bonus of ${score(Math.abs(m.correctnessBonus))} (AXI ${pct(m.axi.correctness)} vs ${pct(m.base.correctness)}).`
               : `Correctness gate failed (AXI needs ≥ ${pct(gate.min_correctness)} and within ${pct(gate.max_regression)} of ${vs}), so the score is min(0, efficiency) minus the correctness gap.`}
           </div>
         </div>
@@ -108,7 +109,7 @@ export function MatchPage({ runId, task, model, vs }: { runId: string; task: str
 
       <h2>Side by side</h2>
       <div className="card" style={{ padding: 0 }}>
-        <SummaryTable axi={m.axi} base={m.base} baseline={vs} />
+        <SummaryTable axi={m.axi} base={m.base} baseline={vs} metric={data.run.config.scoring.token_metric ?? "session"} />
       </div>
 
       <h2>Where the tokens go</h2>
