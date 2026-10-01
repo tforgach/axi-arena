@@ -71,8 +71,8 @@ export function TokenFlow({ runId, task, model, arms }: { runId: string; task: s
               </div>
             )}
             <div className="muted small" style={{ padding: "0 16px 12px" }}>
-              Medians over {a.trials} trial(s). “+tokens/call” is measured: how much the next API call's prompt grew. Tokens added early are
-              re-read (from cache) on every later turn, so the scored, cost-weighted total grows with turns too.
+              Medians over {a.trials} trial(s). “+tokens/call” is measured: how much the next API call's prompt grew. The score uses these
+              tool tokens (plus any starting context beyond the other arm's); extra turns are scored separately.
             </div>
           </div>
         );

@@ -103,7 +103,7 @@ export function MatchPage({ runId, task, model, vs }: { runId: string; task: str
         </div>
         <div className="card">
           <h3>Relative improvement per metric</h3>
-          <MetricBars match={m} weights={data.run.config.scoring.weights} />
+          <MetricBars match={m} weights={data.run.config.scoring.weights} tokenMetric={data.run.config.scoring.token_metric ?? "tool"} />
         </div>
       </div>
 

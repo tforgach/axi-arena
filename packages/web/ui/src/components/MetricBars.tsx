@@ -1,14 +1,15 @@
 import type { Match, Metric } from "../types.ts";
 import { num } from "../format.ts";
 
-const LABELS: Record<Metric, string> = { tokens: "Tokens (weighted)", turns: "Turns", time: "Time", errors: "Errors + escapes" };
+const LABELS: Record<Metric, string> = { tokens: "Tokens", turns: "Turns", time: "Time", errors: "Errors + escapes" };
 const METRICS: Metric[] = ["tokens", "turns", "time", "errors"];
 
 /**
  * Diverging bars of relative improvement per metric (−1..+1, right = AXI better),
  * with each metric's weight in the score. Values are labeled; no hover needed.
  */
-export function MetricBars({ match, weights }: { match: Match; weights: Record<Metric, number> }) {
+export function MetricBars({ match, weights, tokenMetric = "tool" }: { match: Match; weights: Record<Metric, number>; tokenMetric?: "session" | "tool" }) {
+  const label = (m: Metric) => (m === "tokens" ? (tokenMetric === "tool" ? "Tool tokens" : "Session tokens") : LABELS[m]);
   const W = 540, rowH = 34, labelW = 150, valueW = 92, pad = 6;
   const plotW = W - labelW - valueW;
   const mid = labelW + plotW / 2;
@@ -29,7 +30,7 @@ export function MetricBars({ match, weights }: { match: Match; weights: Record<M
         const fill = r >= 0 ? "var(--div-pos)" : "var(--div-neg)";
         return (
           <g key={m}>
-            <text x={0} y={y + barH / 2 + 4} fontSize={12} fill="var(--ink)">{LABELS[m]}</text>
+            <text x={0} y={y + barH / 2 + 4} fontSize={12} fill="var(--ink)">{label(m)}</text>
             <text x={0} y={y + barH / 2 + 17} fontSize={10.5} fill="var(--ink-muted)">weight {num(weights[m] * 100)}%</text>
             <rect x={x0} y={y} width={w} height={barH} rx={Math.min(4, w / 2)} fill={fill} />
             <text
