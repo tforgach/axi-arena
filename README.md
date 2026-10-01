@@ -207,37 +207,40 @@ token view is measured: each call's cost is how much the next API call's prompt 
 
 <p align="center"><img src="docs/match.png" alt="Match detail: per-metric bars, side-by-side medians, and a per-command token breakdown for each arm" width="820"></p>
 
-## Results: axi-fetch 0.2.0
+## Results: axi-fetch 0.3.0
 
-The reference pack benchmarks [axi-fetch](https://github.com/tforgach/axi-fetch) 0.2.0 (usage
-delivered as ambient context) against Claude Code's built-in `WebFetch` and against raw `curl`.
-6 tasks (2 of them canaries), Claude Haiku 4.5, 3 trials per arm, replayed network, scored on tool
-tokens. The AXI was **100% correct on every task** and made zero escapes.
+The reference pack benchmarks [axi-fetch](https://github.com/tforgach/axi-fetch) 0.3.0 (usage
+delivered as a two-line SessionStart hook) against Claude Code's built-in `WebFetch` and raw
+`curl`. 14 tasks: 8 train and 6 held-out, covering docs, articles, Wikipedia tables, canaries, a
+404, JSON APIs and RFC plain text. Claude Haiku 4.5, 3 trials per arm, replayed network, tool-token
+score with the hook's ambient context charged to axi-fetch. The AXI was **100% correct on every task**.
 
-**Arena Score +31.9** (95% CI +28.8 to +35.7), significant against both baselines.
-
-| Task | Tool tokens vs WebFetch | vs curl | Turns (vs curl) |
+| | Overall | vs WebFetch | vs curl |
 |---|--:|--:|--:|
-| python-asyncio-timeout (long docs page) | **−95%** | **−89%** | 2 vs 12 |
-| wiki-token-bucket | **−91%** | **−88%** | 2 vs 3 |
-| canary-release-notes (answer deep in the page) | **−89%** | **−90%** | 2 vs 2 |
-| example-title | −46% | −10% | 2 vs 2 |
-| canary-status-table | −36% | −25% | 2 vs 2 |
-| http-404 | −16% | −31% | 2 vs 2 |
+| **All 14 tasks** | **+27.6** [+18.9, +29.4] | **+35.4** [+24.0, +36.2] | **+19.9** [+8.6, +25.2] |
+| Held-out 6 | +32.3 [+23.7, +38.5] | +44.2 [+34.2, +45.0] | +20.4 [+8.4, +34.1] |
 
-By baseline: **+29.0 vs WebFetch** [+26.9, +31.4] and **+34.9 vs curl** [+28.8, +41.6].
+On content-heavy pages, axi-fetch needs **81–98% fewer tool tokens than WebFetch** (docs, Wikipedia,
+MDN, JSON APIs, RFC text) in the same number of turns. Against `curl … | grep` it wins on large pages
+(e.g. −74% to −89% tool tokens and up to 71% fewer turns on Python docs) and is about even on tiny
+pages and on RFC text, where a single well-aimed grep is hard to beat.
 
-It took several steps to get there, all measured in the arena and scored the same way:
+**How it got there:** 0.3.0 was hill-climbed with this arena. Each change was kept only if the
+train-task score improved without losing correctness, then checked on held-out tasks that were never
+used for choosing.
 
-| axi-fetch | Arena Score vs WebFetch |
-|---|---|
-| 0.1.x, usage delivered as a skill | −49.0: extra turns for the skill load, then `--full`, then a `Read` of an output too big to show inline |
-| 0.1.x, usage delivered by a hook | +4.8 (not significant) |
-| **0.2.0** (`--find`, paging, leaner defaults) + hook | **+29.0** |
+| axi-fetch | Train | Held-out |
+|---|--:|--:|
+| 0.2.0 | +11.6 | −13.9 (failed every JSON API and most text tasks) |
+| + JSON and text/Markdown support | +27.9 | +38.1 |
+| + hook mentions JSON APIs and text files | +32.5 | +37.1 |
+| + leaner output envelope, two-line hook (**0.3.0**) | +33.8 | +38.7 |
 
-Session totals, which include ~9–12k tokens of fixed system-prompt and tool overhead and are noisy
-with prompt-cache warmth, show the same direction but smaller: −62% on the docs page and −42% on
-Wikipedia. That's why the score uses tool tokens by default. Early numbers: one model, a small task set.
+These iteration scores reuse one set of baseline trials. The official run above re-ran the
+baselines fresh, and curl did better this time (e.g. correct on the 404 task where it had failed
+before), hence its lower numbers. Rejected attempts included a one-line hook (the agent deliberated
+more) and smaller `--find` results (cut the second fact of two-part questions). Under the same
+scoring, axi-fetch 0.1.x scored −49 against WebFetch. Early numbers: one model.
 
 ## Repository layout
 

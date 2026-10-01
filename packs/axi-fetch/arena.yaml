@@ -1,6 +1,6 @@
 # Reference pack: axi-fetch vs Claude Code's built-in WebFetch.
 name: axi-fetch
-version: 0.2.0
+version: 0.3.0
 axi_version_cmd: axi-fetch --version
 
 # Installs a pinned axi-fetch into .tools/ (no global install).
