@@ -1,0 +1,9 @@
+{
+  "method": "GET",
+  "url": "https://go.dev/doc/effective_go",
+  "status": 200,
+  "headers": {
+    "content-type": "text/html; charset=utf-8"
+  },
+  "recorded_at": "2026-09-30T21:19:42.812Z"
+}

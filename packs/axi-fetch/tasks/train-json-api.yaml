@@ -1,0 +1,12 @@
+id: train-json-api
+prompt: >
+  Using the GitHub API response at https://api.github.com/repos/python/cpython, what is the
+  repository's default branch and its primary language? Answer briefly.
+tags: [train, json]
+checks:
+  - { type: regex, pattern: '\bmain\b', required: true }
+  - { type: contains, value: Python, required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Score 1.0 if it says the default branch is main and the language is Python. Score 0.5 if only one is right.
+  reference: Default branch main; language Python.

@@ -1,0 +1,12 @@
+id: holdout-github-api
+prompt: >
+  Using the GitHub API response at https://api.github.com/repos/nodejs/node, what is the
+  repository's default branch and its primary language? Answer briefly.
+tags: [holdout, json]
+checks:
+  - { type: regex, pattern: '\bmain\b', required: true }
+  - { type: contains, value: JavaScript, required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Score 1.0 if it says the default branch is main and the language is JavaScript. Score 0.5 if only one is right.
+  reference: Default branch main; language JavaScript.

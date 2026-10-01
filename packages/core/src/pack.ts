@@ -111,18 +111,27 @@ export interface Pack extends Manifest {
 
 export class PackError extends Error {}
 
+/** Parse a YAML file, turning syntax errors into a PackError that names the file and line. */
+function readYaml(path: string): any {
+  try {
+    return parseYaml(readFileSync(path, "utf8"));
+  } catch (e) {
+    throw new PackError(`${path}: ${e instanceof Error ? e.message.split("\n")[0] : String(e)}`);
+  }
+}
+
 /** Load `arena.yaml` plus `tasks/*.yaml` from a pack directory, validating everything. */
 export function loadPack(dirArg: string): Pack {
   const dir = resolve(dirArg);
   const manifestPath = join(dir, "arena.yaml");
   if (!existsSync(manifestPath)) throw new PackError(`no arena.yaml in ${dir}`);
 
-  const raw = parseYaml(readFileSync(manifestPath, "utf8")) ?? {};
+  const raw = readYaml(manifestPath) ?? {};
   const taskDir = join(dir, "tasks");
   const fileTasks: unknown[] = [];
   if (existsSync(taskDir)) {
     for (const f of readdirSync(taskDir).filter((f) => /\.ya?ml$/.test(f)).sort()) {
-      fileTasks.push(parseYaml(readFileSync(join(taskDir, f), "utf8")));
+      fileTasks.push(readYaml(join(taskDir, f)));
     }
   }
   raw.tasks = [...(raw.tasks ?? []), ...fileTasks];

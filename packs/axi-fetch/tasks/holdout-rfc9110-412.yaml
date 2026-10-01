@@ -1,0 +1,12 @@
+id: holdout-rfc9110-412
+prompt: >
+  In RFC 9110 (https://www.rfc-editor.org/rfc/rfc9110.txt), which status code is
+  "Precondition Failed", and what is the number of the section that defines it? Answer briefly.
+tags: [holdout, text, huge]
+checks:
+  - { type: regex, pattern: '\b412\b', required: true }
+  - { type: contains, value: "15.5.13", required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Score 1.0 if it says 412 and section 15.5.13. Score 0.5 if only the status code is right.
+  reference: 412, defined in section 15.5.13.

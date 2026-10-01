@@ -36,6 +36,7 @@ Run flags:
   --network mode       replay|record|live for every task (default: per task / pack defaults.network)
   --keep               Keep trial working dirs for debugging
   --skip-preflight     Don't check credentials/models before running
+  --reuse-baselines id Reuse baseline trials from an earlier run of this pack; only axi runs
   --yes, -y            Skip the confirmation prompt
 
 Packs can be a path or a name registered under \`packs:\` in ~/.axi-arena/config.yaml, which
@@ -60,6 +61,7 @@ const { values: flags, positionals } = parseArgs({
     "no-judge": { type: "boolean", default: false },
     "skip-preflight": { type: "boolean", default: false },
     "metrics-only": { type: "boolean", default: false },
+    "reuse-baselines": { type: "string" },
     detail: { type: "boolean", default: false },
     port: { type: "string" },
     network: { type: "string" },
@@ -135,6 +137,7 @@ function resolveOptions(pack: Pack): RunOptions {
   return {
     config: config(),
     auth: auth(),
+    reuseBaselinesFrom: flags["reuse-baselines"],
     network: flags.network as Network | undefined,
     models: list(flags.models) ?? pack.defaults.models,
     trials: positiveInt(flags.trials, pack.defaults.trials, "trials"),
@@ -151,7 +154,7 @@ function resolveOptions(pack: Pack): RunOptions {
 }
 
 function printEstimate(pack: Pack, opts: RunOptions): void {
-  const planned = planTrials(opts);
+  const planned = planTrials({ ...opts, arms: opts.reuseBaselinesFrom ? ["axi"] : opts.arms });
   const hist = historicalTokens(openDb(), pack.name);
   let known = 0;
   let tokens = 0;
@@ -161,7 +164,8 @@ function printEstimate(pack: Pack, opts: RunOptions): void {
   }
   console.log(`pack      ${pack.name} (${pack.dir})`);
   console.log(`tasks     ${opts.tasks.length}  ·  arms ${opts.arms.join(", ")}  ·  models ${opts.models.join(", ")}`);
-  console.log(`trials    ${planned.length}  (${opts.tasks.length} tasks × ${opts.arms.length} arms × ${opts.models.length} models × ${opts.trials})`);
+  const armCount = opts.reuseBaselinesFrom ? 1 : opts.arms.length;
+  console.log(`trials    ${planned.length}  (${opts.tasks.length} tasks × ${armCount} arm${armCount > 1 ? "s" : ""} × ${opts.models.length} models × ${opts.trials})${opts.reuseBaselinesFrom ? `  · baselines reused from ${opts.reuseBaselinesFrom}` : ""}`);
   console.log(`effort    ${opts.effort}  ·  concurrency ${opts.concurrency}  ·  max turns ${opts.maxTurns}  ·  timeout ${opts.timeoutS}s`);
   console.log(`judge     ${opts.useJudge ? opts.judgeModel : "off (checks only)"}`);
   const a = opts.auth ?? auth();
@@ -247,7 +251,7 @@ function printScoreboard(trials: TrialRow[], scoring: ScoringConfig): void {
     rows.push([
       m.model, m.task, m.baseline,
       `${pct(m.axi.correctness)} / ${pct(m.base.correctness)}`,
-      delta(m.axi.toolTokens, m.base.toolTokens),
+      delta(m.axi.tokens, m.base.tokens),
       delta(m.axi.sessionTokens, m.base.sessionTokens),
       delta(m.axi.turns, m.base.turns),
       delta(m.axi.time, m.base.time),
@@ -260,7 +264,7 @@ function printScoreboard(trials: TrialRow[], scoring: ScoringConfig): void {
   printTable(rows, new Set([3, 4, 5, 6, 7, 8, 9]));
   const metric = scoring.token_metric ?? "tool";
   console.log(
-    `tool tok = what tool calls added to the context (+ side models) · session = whole session, cost-weighted · scored: ${metric === "tool" ? "tool tok" : "session"}\n` +
+    `tool tok = what tool calls added to the context (+ side models, + ambient context beyond the other arm's) · session = whole session, cost-weighted · scored: ${metric === "tool" ? "tool tok" : "session"}\n` +
       "tokens/turns/time: AXI relative to baseline (− is better) · errors: median axi / base, incl. escapes · score includes the correctness bonus",
   );
   const missed = trials.filter((t) => (t.fixture_misses ?? 0) > 0);

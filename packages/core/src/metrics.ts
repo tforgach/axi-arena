@@ -40,6 +40,8 @@ export interface TrialMetrics {
    * (system prompt, tool definitions) that dilutes relative savings in session totals.
    */
   toolTokens: number | null;
+  /** Prompt size of the first API call: system prompt, tool definitions, skills, hook output. */
+  baseContext: number | null;
   tokensByModel: Record<string, ModelTokens>;
   numTurns: number | null;
   durationMs: number | null;
@@ -124,6 +126,7 @@ export function computeMetrics(messages: SDKMessage[], guardDenials: GuardDenial
     tokensTotal: result ? Object.values(byModel).reduce((s, t) => s + t.total, 0) : null,
     tokensWeighted: result ? Math.round(Object.values(byModel).reduce((s, t) => s + t.weighted, 0)) : null,
     toolTokens: result ? toolTokens(messages) : null,
+    baseContext: callCosts(messages).baseContext,
     tokensByModel: byModel,
     numTurns: result?.num_turns ?? null,
     durationMs: result?.duration_ms ?? null,

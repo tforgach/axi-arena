@@ -7,7 +7,7 @@ import { query, type SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import { buildArmPlugin, buildQueryOptions, cleanupClaudeProjectDir, trialEnv, trialWorkDir, type GuardDenial } from "./arm.ts";
 import { scriptRunner } from "./checks.ts";
 import {
-  appendEvent, cancelQueuedTrials, finishRun, finishTrial, insertRun, insertTrial, isCancelRequested, setGrade, startTrial,
+  appendEvent, cancelQueuedTrials, copyTrials, finishRun, getRun, finishTrial, insertRun, insertTrial, isCancelRequested, setGrade, startTrial,
   type Db, type TrialOutcome,
 } from "./db.ts";
 import { gradeTrial, type Grade } from "./grading.ts";
@@ -33,6 +33,11 @@ export interface RunOptions {
   useJudge: boolean;
   /** Overrides every task's network mode (e.g. `record`). */
   network?: Network;
+  /**
+   * Reuse finished baseline trials from this earlier run of the same pack instead of running
+   * them again (only the `axi` arm runs). For iterating on an AXI: baselines don't change.
+   */
+  reuseBaselinesFrom?: string;
   /** Credentials/provider setup; resolved from ~/.axi-arena/config.yaml if omitted. */
   auth?: AuthSetup;
   config?: ArenaConfig;
@@ -120,7 +125,13 @@ export async function executeRun(db: Db, pack: Pack, optsIn: RunOptions, hooks: 
   const log = (l: string) => hooks.onLog?.(l);
   const arenaVars = { ARENA_RUN_ID: runId, ARENA_PACK_DIR: pack.dir, ARENA_RUN_DIR: dir };
 
-  const planned = planTrials(opts);
+  if (opts.reuseBaselinesFrom) {
+    const src = getRun(db, opts.reuseBaselinesFrom);
+    if (!src) throw new Error(`--reuse-baselines: no run ${opts.reuseBaselinesFrom}`);
+    if (src.pack_name !== pack.name) throw new Error(`--reuse-baselines: run ${src.id} is pack ${src.pack_name}, not ${pack.name}`);
+  }
+  const reusedArms = opts.reuseBaselinesFrom ? opts.arms.filter((a) => a !== "axi") : [];
+  const planned = planTrials({ ...opts, arms: opts.reuseBaselinesFrom ? ["axi"] : opts.arms });
   let setupDone = false;
   try {
     if (pack.setup) {
@@ -149,6 +160,11 @@ export async function executeRun(db: Db, pack: Pack, optsIn: RunOptions, hooks: 
 
     const plugins = new Map(opts.arms.map((a) => [a, buildArmPlugin(pack, a, pack.arms[a], join(dir, "plugins"))]));
     for (const t of planned) insertTrial(db, { id: t.id, run_id: runId, task_id: t.task.id, arm: t.arm, model: t.model, trial_index: t.index });
+    if (opts.reuseBaselinesFrom) {
+      const n = copyTrials(db, opts.reuseBaselinesFrom, runId, { arms: reusedArms, tasks: opts.tasks.map((t) => t.id), models: opts.models });
+      hooks.onLog?.(`reused ${n} baseline trial(s) (${reusedArms.join(", ")}) from run ${opts.reuseBaselinesFrom}`);
+      if (n === 0) throw new Error(`--reuse-baselines: run ${opts.reuseBaselinesFrom} has no finished ${reusedArms.join("/")} trials for these tasks/models`);
+    }
     hooks.onRunStart?.(runId, planned);
     cancelPoll = setInterval(() => {
       if (!signal.aborted && isCancelRequested(db, runId)) {
@@ -225,7 +241,7 @@ async function runTrial(
 ): Promise<{ outcome: TrialOutcome; grade: Grade | null }> {
   const empty: TrialOutcome = {
     status: "error", result_text: null, sdk_subtype: null, num_turns: null, tool_calls: null, tool_errors: null, error_recoveries: null,
-    escape_attempts: null, duration_ms: null, duration_api_ms: null, tokens_total: null, tokens_weighted: null, tool_tokens: null, tokens_json: null,
+    escape_attempts: null, duration_ms: null, duration_api_ms: null, tokens_total: null, tokens_weighted: null, tool_tokens: null, base_context: null, tokens_json: null,
     cost_usd: null, error: null, network: null, model_id: null, fixture_misses: null, proxy_json: null,
   };
   const network = taskNetwork(pack, t.task, opts);
@@ -316,6 +332,7 @@ async function runTrial(
     tokens_total: m.tokensTotal,
     tokens_weighted: m.tokensWeighted,
     tool_tokens: m.toolTokens,
+    base_context: m.baseContext,
     tokens_json: JSON.stringify(m.tokensByModel),
     cost_usd: m.costUsd,
     error: timedOut ? `timed out after ${opts.timeoutS}s` : error,

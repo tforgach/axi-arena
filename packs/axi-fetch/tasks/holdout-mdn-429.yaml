@@ -1,0 +1,12 @@
+id: holdout-mdn-429
+prompt: >
+  According to MDN's page https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Status/429,
+  which response header can a server include to tell the client how long to wait before
+  making a new request? Answer briefly.
+tags: [holdout, docs]
+checks:
+  - { type: contains, value: Retry-After, required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Score 1.0 if it names the Retry-After header. Extra correct detail is fine.
+  reference: The Retry-After header.

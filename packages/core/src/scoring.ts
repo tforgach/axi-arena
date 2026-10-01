@@ -30,6 +30,7 @@ export interface ScoredTrial {
   correctness: number | null;
   tokens_weighted: number | null;
   tool_tokens?: number | null;
+  base_context?: number | null;
   num_turns: number | null;
   duration_ms: number | null;
   tool_errors: number | null;
@@ -41,12 +42,18 @@ export const METRICS = ["tokens", "turns", "time", "errors"] as const;
 export type Metric = (typeof METRICS)[number];
 
 export interface ArmSummary {
+  /** Which token count `tokens` holds. */
+  metric?: "tool" | "session";
   n: number;
   correctness: number;
   /** The token count the score uses (see ScoringConfig.token_metric). */
   tokens: number;
   sessionTokens: number;
   toolTokens: number;
+  /** Median starting context (system prompt + tools + skills + hook output). */
+  baseContext: number;
+  /** Starting context beyond the other arm's (hooks, preloaded skills, skill listing); charged under the tool metric. */
+  ambient: number;
   turns: number;
   time: number;
   errors: number;
@@ -100,18 +107,39 @@ export function summarize(trials: ScoredTrial[], tokenMetric: "session" | "tool"
   const hasTool = trials.some((t) => t.tool_tokens != null);
   const useTool = tokenMetric === "tool" && hasTool;
   return {
+    metric: useTool ? "tool" : "session",
     n: trials.length,
     // Correctness is a rate, so it's averaged; efficiency metrics use medians.
     correctness: mean(trials.map((t) => t.correctness ?? 0)),
     tokens: med((t) => (useTool ? (t.tool_tokens ?? null) : t.tokens_weighted)),
     sessionTokens: med((t) => t.tokens_weighted),
     toolTokens: med((t) => t.tool_tokens ?? null),
+    baseContext: med((t) => t.base_context ?? null),
+    ambient: 0,
     turns: med((t) => t.num_turns),
     time: med((t) => t.duration_ms),
     // Scored errors: escapes + errors the agent had to recover from (falls back to raw errors for old rows).
     errors: med((t) => (t.error_recoveries ?? t.tool_errors ?? 0) + (t.escape_attempts ?? 0)),
   };
 }
+
+/**
+ * Under the tool metric, each arm is also charged for starting context beyond the other arm's
+ * (hook output, preloaded skills, the skill listing). Without this, an AXI could move its
+ * instructions into ambient context for free. Built-in tool definitions are identical across
+ * arms, so the difference is what the arm itself adds.
+ */
+export function chargeAmbient(a: ArmSummary, b: ArmSummary): [ArmSummary, ArmSummary] {
+  if (a.metric !== "tool" || b.metric !== "tool" || !a.baseContext || !b.baseContext) return [a, b];
+  const ambA = Math.max(0, a.baseContext - b.baseContext);
+  const ambB = Math.max(0, b.baseContext - a.baseContext);
+  return [
+    { ...a, ambient: ambA, tokens: a.tokens + ambA },
+    { ...b, ambient: ambB, tokens: b.tokens + ambB },
+  ];
+}
+
+const pair = (axi: ScoredTrial[], base: ScoredTrial[], tm: "session" | "tool") => chargeAmbient(summarize(axi, tm), summarize(base, tm));
 
 export function scoreMatch(axi: ArmSummary, base: ArmSummary, cfg: ScoringConfig): MatchScore {
   // max(b, 1) avoids dividing by zero: 0 errors vs 0 errors is parity; 0 vs 2 is clamped to −1.
@@ -169,7 +197,7 @@ export function computeScoreboard(trials: ScoredTrial[], cfg: ScoringConfig, ite
   }
 
   const tm = cfg.token_metric ?? DEFAULT_TOKEN_METRIC;
-  const point = groups.map((g) => ({ g, s: scoreMatch(summarize(g.axi, tm), summarize(g.base, tm), cfg) }));
+  const point = groups.map((g) => ({ g, s: scoreMatch(...pair(g.axi, g.base, tm), cfg) }));
 
   // Bootstrap: resample trials within each arm of every match, jointly, so aggregates get CIs too.
   const rand = mulberry32(seed);
@@ -179,7 +207,7 @@ export function computeScoreboard(trials: ScoredTrial[], cfg: ScoringConfig, ite
   if (groups.some(canBootstrap)) {
     for (let i = 0; i < iterations; i++) {
       groups.forEach((g, gi) => {
-        draws[gi].push(canBootstrap(g) ? scoreMatch(summarize(resample(g.axi), tm), summarize(resample(g.base), tm), cfg).score : point[gi].s.score);
+        draws[gi].push(canBootstrap(g) ? scoreMatch(...pair(resample(g.axi), resample(g.base), tm), cfg).score : point[gi].s.score);
       });
     }
   }
@@ -192,7 +220,8 @@ export function computeScoreboard(trials: ScoredTrial[], cfg: ScoringConfig, ite
 
   const matches: Match[] = point.map(({ g, s }, gi) => {
     const ci = canBootstrap(g) ? ciOf(draws[gi]) : null;
-    return { task: g.task, model: g.model, baseline: g.baseline, axi: summarize(g.axi, tm), base: summarize(g.base, tm), ...s, ci, significant: sig(ci) };
+    const [axi, base] = pair(g.axi, g.base, tm);
+    return { task: g.task, model: g.model, baseline: g.baseline, axi, base, ...s, ci, significant: sig(ci) };
   });
 
   const aggregate = (key: string, idx: number[]): Aggregate => {

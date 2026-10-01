@@ -2,7 +2,7 @@ id: canary-status-table
 prompt: >
   Using https://tidewright.github.io/status, list every region whose status is
   "Degraded", with the note for each.
-tags: [canary, table]
+tags: [train, canary, table]
 network: replay            # synthetic page; only exists in fixtures
 checks:
   - { type: contains, value: East Shoals, required: true }

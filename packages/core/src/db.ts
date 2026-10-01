@@ -42,6 +42,7 @@ CREATE TABLE IF NOT EXISTS trials (
   tokens_total     INTEGER,
   tokens_weighted  INTEGER,             -- scored: cost-weighted input-token equivalents
   tool_tokens      INTEGER,             -- context added by tool calls + side-model tokens (measured)
+  base_context     INTEGER,             -- first call's prompt size (system prompt, tools, skills, hook output)
   tokens_json      TEXT,                -- per-model usage breakdown
   model_id         TEXT,                -- model the session actually ran (after alias/provider resolution)
   network          TEXT,                -- replay | record | live
@@ -74,6 +75,7 @@ const MIGRATIONS: { table: string; column: string; ddl: string }[] = [
   { table: "runs", column: "cancel_requested", ddl: "ALTER TABLE runs ADD COLUMN cancel_requested INTEGER NOT NULL DEFAULT 0" },
   { table: "trials", column: "tokens_weighted", ddl: "ALTER TABLE trials ADD COLUMN tokens_weighted INTEGER" },
   { table: "trials", column: "tool_tokens", ddl: "ALTER TABLE trials ADD COLUMN tool_tokens INTEGER" },
+  { table: "trials", column: "base_context", ddl: "ALTER TABLE trials ADD COLUMN base_context INTEGER" },
   { table: "trials", column: "error_recoveries", ddl: "ALTER TABLE trials ADD COLUMN error_recoveries INTEGER" },
   { table: "trials", column: "model_id", ddl: "ALTER TABLE trials ADD COLUMN model_id TEXT" },
   { table: "trials", column: "network", ddl: "ALTER TABLE trials ADD COLUMN network TEXT" },
@@ -129,6 +131,7 @@ export interface TrialRow {
   tokens_total: number | null;
   tokens_weighted: number | null;
   tool_tokens: number | null;
+  base_context: number | null;
   tokens_json: string | null;
   model_id: string | null;
   network: string | null;
@@ -173,12 +176,12 @@ export type TrialOutcome = Omit<
 export function finishTrial(db: Db, id: string, o: TrialOutcome): void {
   db.prepare(
     `UPDATE trials SET status = ?, finished_at = ?, result_text = ?, sdk_subtype = ?, num_turns = ?, tool_calls = ?,
-       tool_errors = ?, error_recoveries = ?, escape_attempts = ?, duration_ms = ?, duration_api_ms = ?, tokens_total = ?, tokens_weighted = ?, tool_tokens = ?, tokens_json = ?,
+       tool_errors = ?, error_recoveries = ?, escape_attempts = ?, duration_ms = ?, duration_api_ms = ?, tokens_total = ?, tokens_weighted = ?, tool_tokens = ?, base_context = ?, tokens_json = ?,
        cost_usd = ?, error = ?, network = ?, model_id = ?, fixture_misses = ?, proxy_json = ?
      WHERE id = ?`,
   ).run(
     o.status, now(), o.result_text, o.sdk_subtype, o.num_turns, o.tool_calls, o.tool_errors, o.error_recoveries, o.escape_attempts,
-    o.duration_ms, o.duration_api_ms, o.tokens_total, o.tokens_weighted, o.tool_tokens, o.tokens_json, o.cost_usd, o.error,
+    o.duration_ms, o.duration_api_ms, o.tokens_total, o.tokens_weighted, o.tool_tokens, o.base_context, o.tokens_json, o.cost_usd, o.error,
     o.network, o.model_id, o.fixture_misses, o.proxy_json, id,
   );
 }
@@ -190,8 +193,8 @@ export function setGrade(db: Db, trialId: string, correctness: number | null, ch
 }
 
 /** Backfill measured tool tokens (rescore computes them from stored events). */
-export function setToolTokens(db: Db, trialId: string, toolTokens: number | null): void {
-  db.prepare(`UPDATE trials SET tool_tokens = ? WHERE id = ?`).run(toolTokens, trialId);
+export function setToolTokens(db: Db, trialId: string, toolTokens: number | null, baseContext: number | null = null): void {
+  db.prepare(`UPDATE trials SET tool_tokens = ?, base_context = COALESCE(?, base_context) WHERE id = ?`).run(toolTokens, baseContext, trialId);
 }
 
 export function trialEvents(db: Db, trialId: string): unknown[] {
@@ -241,6 +244,25 @@ export function isCancelRequested(db: Db, runId: string): boolean {
 export function cancelQueuedTrials(db: Db, runId: string): number {
   const r = db.prepare(`UPDATE trials SET status = 'cancelled', finished_at = ? WHERE run_id = ? AND status = 'queued'`).run(now(), runId);
   return Number(r.changes);
+}
+
+/**
+ * Copy finished baseline trials (rows + transcripts) from an earlier run into a new one, for
+ * `--reuse-baselines`: when only the AXI changes, baselines needn't be re-run. Returns count.
+ */
+export function copyTrials(db: Db, fromRun: string, toRun: string, where: { arms: string[]; tasks: string[]; models: string[] }): number {
+  const rows = (db.prepare(`SELECT * FROM trials WHERE run_id = ?`).all(fromRun) as unknown as TrialRow[]).filter(
+    (t) => where.arms.includes(t.arm) && where.tasks.includes(t.task_id) && where.models.includes(t.model) && !["queued", "running", "cancelled"].includes(t.status),
+  );
+  const cols = Object.keys(rows[0] ?? {}).filter((c) => c !== "id" && c !== "run_id");
+  const insert = db.prepare(`INSERT INTO trials (id, run_id, ${cols.join(", ")}) VALUES (?, ?, ${cols.map(() => "?").join(", ")})`);
+  const events = db.prepare(`INSERT INTO events (trial_id, seq, ts, type, json) SELECT ?, seq, ts, type, json FROM events WHERE trial_id = ?`);
+  for (const t of rows) {
+    const id = `${t.id}@${toRun}`;
+    insert.run(id, toRun, ...cols.map((c) => (t as unknown as Record<string, string | number | null>)[c] ?? null));
+    events.run(id, t.id);
+  }
+  return rows.length;
 }
 
 export function listRuns(db: Db, limit = 20): RunRow[] {

@@ -3,7 +3,7 @@ prompt: >
   Using https://docs.python.org/3/library/asyncio-task.html, in which Python version
   was asyncio.timeout() added, and what does the page say happens to the task when
   asyncio.wait_for() times out? Answer briefly.
-tags: [docs, deep-content]
+tags: [train, docs, deep-content]
 checks:
   - { type: regex, pattern: '3\.11', required: true }
   - { type: regex, pattern: 'cancel' }

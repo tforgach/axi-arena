@@ -1,0 +1,11 @@
+id: train-text-rfc
+prompt: >
+  In RFC 9111 (https://www.rfc-editor.org/rfc/rfc9111.txt), which section number defines the
+  Age header field? Answer briefly.
+tags: [train, text, huge]
+checks:
+  - { type: regex, pattern: '\b5\.1\b', required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Score 1.0 if it says section 5.1.
+  reference: Section 5.1.

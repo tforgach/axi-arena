@@ -1,0 +1,12 @@
+{
+  "method": "GET",
+  "url": "https://www.rfc-editor.org/rfc/rfc9111.txt",
+  "status": 200,
+  "headers": {
+    "content-type": "text/plain;charset=utf-8",
+    "cache-control": "public, max-age=86400",
+    "etag": "W/\"f8907618635703edd228aee4aa834eee\"",
+    "link": "<https://www.rfc-editor.org/info/rfc9111/>; rel=\"canonical\""
+  },
+  "recorded_at": "2026-09-30T21:21:50.462Z"
+}

@@ -1,0 +1,12 @@
+id: holdout-functools-cache
+prompt: >
+  Using https://docs.python.org/3/library/functools.html, in which Python version was
+  functools.cache added, and what does the page say it is the same as? Answer briefly.
+tags: [holdout, docs]
+checks:
+  - { type: regex, pattern: '3\.9', required: true }
+  - { type: contains, value: lru_cache, required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Score 1.0 if it says Python 3.9 and that cache is the same as lru_cache(maxsize=None). Score 0.5 if only one of the two is right.
+  reference: Added in 3.9; the same as lru_cache(maxsize=None).

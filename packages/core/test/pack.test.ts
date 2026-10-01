@@ -59,3 +59,8 @@ test("planTrials interleaves arms so each match's arms run close together", () =
   assert.deepEqual(plan.map((t) => `${t.arm}#${t.index}`), ["axi#0", "native#0", "axi#1", "native#1"]);
   assert.equal(new Set(plan.map((t) => t.id)).size, plan.length);
 });
+
+test("YAML syntax errors become a PackError naming the file", () => {
+  const dir = makePack(`name: d\n${ARMS}`, { "bad.yaml": `id: t\nprompt: hi\njudge:\n  reference: "quoted", then more\n` });
+  assert.throws(() => loadPack(dir), (e: unknown) => e instanceof PackError && /bad\.yaml/.test((e as Error).message));
+});

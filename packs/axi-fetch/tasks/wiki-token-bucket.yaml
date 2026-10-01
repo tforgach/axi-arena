@@ -4,7 +4,7 @@ prompt: >
   the token bucket compared to, and how does the article describe the relationship
   between the two when that other algorithm is used as a meter? Answer in two short
   sentences.
-tags: [article, single-fetch]
+tags: [train, article, single-fetch]
 checks:
   - { type: contains, value: leaky bucket, required: true }
   - { type: tool_called, min: 1 }

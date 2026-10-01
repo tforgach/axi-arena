@@ -1,0 +1,11 @@
+id: holdout-effective-go-defer
+prompt: >
+  According to https://go.dev/doc/effective_go, in what order are deferred function calls
+  executed? Answer in one sentence.
+tags: [holdout, docs, long]
+checks:
+  - { type: regex, pattern: 'LIFO|last[- ]in[, -]+first[- ]out', flags: i, required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Score 1.0 if it says deferred calls run in last-in-first-out (LIFO) order, i.e. reverse order of deferral.
+  reference: Last-in-first-out (LIFO) order.

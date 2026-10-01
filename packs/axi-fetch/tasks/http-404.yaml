@@ -2,7 +2,7 @@ id: http-404
 prompt: >
   Fetch https://httpbin.org/status/404 and tell me whether it succeeded. If it
   failed, give the HTTP status code.
-tags: [error-handling]
+tags: [train, error-handling]
 checks:
   - { type: regex, pattern: '\b404\b', required: true }
 judge:

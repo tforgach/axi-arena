@@ -33,7 +33,7 @@ export async function rescoreRun(
       const row = rows[next++];
       const messages = trialEvents(db, row.id) as SDKMessage[];
       const m = computeMetrics(messages, []);
-      setToolTokens(db, row.id, m.toolTokens);
+      setToolTokens(db, row.id, m.toolTokens, m.baseContext);
       if (metricsOnly) {
         onTrial?.(row, null);
         continue;

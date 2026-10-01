@@ -12,7 +12,7 @@ const trial = (arm: string, o: Partial<ScoredTrial> = {}): ScoredTrial => ({
   tokens_weighted: 1000, num_turns: 2, duration_ms: 1000, tool_errors: 0, error_recoveries: 0, escape_attempts: 0, ...o,
 });
 
-const arm = (o: Partial<ReturnType<typeof summarize>>) => ({ n: 3, correctness: 1, tokens: 1000, sessionTokens: 1000, toolTokens: 0, turns: 2, time: 1000, errors: 0, ...o });
+const arm = (o: Partial<ReturnType<typeof summarize>>) => ({ n: 3, correctness: 1, tokens: 1000, sessionTokens: 1000, toolTokens: 0, baseContext: 0, ambient: 0, turns: 2, time: 1000, errors: 0, ...o });
 
 test("parity scores 0; halving tokens with everything else equal scores +20", () => {
   assert.equal(scoreMatch(arm({}), arm({}), cfg).score, 0);
@@ -56,6 +56,20 @@ test("tool tokens are scored by default; trials without them fall back to sessio
   assert.equal(computeScoreboard(withTool, { ...cfg, token_metric: "session" }).matches[0]!.r.tokens, 0);
   const legacy = [trial("axi", { tokens_weighted: 500, tool_tokens: null }), trial("native", { tokens_weighted: 1000, tool_tokens: null })];
   assert.ok(Math.abs(computeScoreboard(legacy, cfg).matches[0]!.r.tokens - 0.5) < 1e-9, "no tool tokens recorded → session fallback");
+});
+
+test("ambient context (hooks, preloaded skills) beyond the other arm's is charged under the tool metric", () => {
+  const trials = [
+    trial("axi", { tool_tokens: 100, base_context: 12_600 }), // 600 tokens of hook output
+    trial("native", { tool_tokens: 1000, base_context: 12_000 }),
+  ];
+  const m = computeScoreboard(trials, cfg).matches[0]!;
+  assert.equal(m.axi.ambient, 600);
+  assert.equal(m.axi.tokens, 700, "100 tool tokens + 600 ambient");
+  assert.equal(m.base.ambient, 0);
+  assert.ok(Math.abs(m.r.tokens - 0.3) < 1e-9);
+  const session = computeScoreboard(trials, { ...cfg, token_metric: "session" }).matches[0]!;
+  assert.equal(session.axi.ambient, 0, "session totals already include ambient context");
 });
 
 test("scoreboard: CI needs ≥2 trials per arm, is reproducible, and flags significance", () => {

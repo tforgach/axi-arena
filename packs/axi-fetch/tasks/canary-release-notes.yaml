@@ -3,7 +3,7 @@ prompt: >
   According to the release notes at https://tidewright.github.io/release-notes,
   in which Tidewright version was the --strict-tides flag added, and what is its default?
   Answer in one sentence.
-tags: [canary, deep-content]
+tags: [train, canary, deep-content]
 network: replay            # synthetic page; only exists in fixtures
 checks:
   - { type: regex, pattern: '4\.7\.0|4\.7\b', required: true }

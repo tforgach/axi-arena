@@ -1,0 +1,13 @@
+id: holdout-wiki-http-418
+prompt: >
+  Using https://en.wikipedia.org/wiki/List_of_HTTP_status_codes, what is the reason phrase
+  for status code 418, and which RFC originally defined it? Answer briefly.
+tags: [holdout, article, table]
+checks:
+  - { type: regex, pattern: "teapot", required: true }
+  - { type: contains, value: "2324", required: true }
+  - { type: tool_called, min: 1 }
+judge:
+  rubric: Score 1.0 if it gives "I'm a teapot" and RFC 2324. Score 0.5 if only one of the two is right.
+  reference: >
+    "I'm a teapot", defined in RFC 2324 (Hyper Text Coffee Pot Control Protocol, April Fools' 1998).

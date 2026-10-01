@@ -1,6 +1,6 @@
 id: example-title
 prompt: What is the title of the page at https://example.com? Reply with just the title.
-tags: [smoke, single-fetch]
+tags: [train, smoke, single-fetch]
 checks:
   - { type: contains, value: Example Domain, required: true }
   - { type: tool_called, min: 1 }

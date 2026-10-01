@@ -1,0 +1,12 @@
+{
+  "method": "GET",
+  "url": "https://en.wikipedia.org/wiki/List_of_HTTP_status_codes",
+  "status": 200,
+  "headers": {
+    "content-language": "en",
+    "last-modified": "Wed, 30 Sep 2026 12:52:05 GMT",
+    "content-type": "text/html; charset=UTF-8",
+    "cache-control": "private, s-maxage=0, max-age=0, must-revalidate, no-transform"
+  },
+  "recorded_at": "2026-09-30T21:20:24.737Z"
+}
